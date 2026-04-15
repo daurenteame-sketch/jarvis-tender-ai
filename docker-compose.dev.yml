@@ -1,0 +1,40 @@
+# ─────────────────────────────────────────────────────────────────
+# LOCAL DEVELOPMENT — no nginx, no SSL, postgres port exposed
+# Usage:
+#   docker compose -f docker-compose.yml -f docker-compose.dev.yml up -d --build
+# Or add alias to .bashrc:
+#   alias dc-dev='docker compose -f docker-compose.yml -f docker-compose.dev.yml'
+# ─────────────────────────────────────────────────────────────────
+
+services:
+  postgres:
+    ports:
+      - "5432:5432"   # Expose for local psql / DB tools
+
+  backend:
+    command: uvicorn main:app --host 0.0.0.0 --port 8000 --log-level info
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8000/health"]
+      interval: 15s
+      timeout: 5s
+      retries: 5
+      start_period: 30s
+
+  frontend:
+    build:
+      context: ./frontend
+      args:
+        NEXT_PUBLIC_API_URL: "http://localhost:8000"
+    healthcheck:
+      test: ["CMD-SHELL", "wget -qO- http://localhost:3000 || exit 1"]
+      interval: 20s
+      timeout: 10s
+      retries: 3
+      start_period: 60s
+
+  # Disable nginx and certbot in local dev (no SSL certs available)
+  nginx:
+    profiles: ["production"]
+
+  certbot:
+    profiles: ["production"]

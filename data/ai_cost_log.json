@@ -1,0 +1,20 @@
+{
+  "runs": [
+    {
+      "timestamp": "2026-04-09T17:45:49.523560+00:00",
+      "lots_processed": 477,
+      "cost_usd": 3.339,
+      "model": "gpt-4o",
+      "mode": "priority"
+    },
+    {
+      "timestamp": "2026-04-10T03:46:48.323175+00:00",
+      "lots_processed": 323,
+      "cost_usd": 2.261,
+      "model": "gpt-4o",
+      "mode": "priority"
+    }
+  ],
+  "total_lots": 800,
+  "total_usd": 5.6
+}

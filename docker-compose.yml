@@ -1,0 +1,124 @@
+services:
+  # ── PostgreSQL ──────────────────────────────────────────────────
+  postgres:
+    image: postgres:15-alpine
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: jarvis_db
+      POSTGRES_USER: jarvis
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-jarvis_secret_password}
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U jarvis -d jarvis_db"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 10s
+    networks:
+      - jarvis_net
+
+  # ── Redis ───────────────────────────────────────────────────────
+  redis:
+    image: redis:7-alpine
+    restart: unless-stopped
+    command: redis-server --maxmemory 256mb --maxmemory-policy allkeys-lru
+    volumes:
+      - redis_data:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 3s
+      retries: 3
+      start_period: 5s
+    networks:
+      - jarvis_net
+
+  # ── Backend (FastAPI) ───────────────────────────────────────────
+  backend:
+    build:
+      context: ./backend
+      dockerfile: Dockerfile
+    restart: unless-stopped
+    env_file: .env
+    environment:
+      DATABASE_URL: postgresql+asyncpg://jarvis:${POSTGRES_PASSWORD:-jarvis_secret_password}@postgres:5432/jarvis_db
+      DATABASE_URL_SYNC: postgresql://jarvis:${POSTGRES_PASSWORD:-jarvis_secret_password}@postgres:5432/jarvis_db
+      REDIS_URL: redis://redis:6379/0
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    dns:
+      - 8.8.8.8
+      - 8.8.4.4
+    volumes:
+      - ./data:/app/data
+    networks:
+      - jarvis_net
+    ports:
+      - "8000:8000"
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8000/health"]
+      interval: 15s
+      timeout: 5s
+      retries: 5
+      start_period: 30s
+
+  # ── Frontend (Next.js) ──────────────────────────────────────────
+  frontend:
+    build:
+      context: ./frontend
+      dockerfile: Dockerfile
+      args:
+        # Baked at build time — browser uses this URL to call backend.
+        # For production: pass --build-arg NEXT_PUBLIC_API_URL=https://your-domain.com
+        # For local dev: http://localhost:8000 (default in next.config.js)
+        NEXT_PUBLIC_API_URL: ${NEXT_PUBLIC_API_URL:-http://localhost:8000}
+    restart: unless-stopped
+    depends_on:
+      backend:
+        condition: service_healthy
+    networks:
+      - jarvis_net
+    ports:
+      - "3000:3000"
+
+  # ── Nginx (Reverse Proxy + SSL) — production only ───────────────
+  nginx:
+    image: nginx:alpine
+    restart: unless-stopped
+    profiles: ["production"]
+    ports:
+      - "80:80"
+      - "443:443"
+    volumes:
+      - ./infrastructure/nginx/nginx.conf:/etc/nginx/nginx.conf:ro
+      - ./infrastructure/nginx/conf.d:/etc/nginx/conf.d:ro
+      - ./infrastructure/certbot/conf:/etc/letsencrypt:ro
+      - ./infrastructure/certbot/www:/var/www/certbot:ro
+    depends_on:
+      - backend
+      - frontend
+    networks:
+      - jarvis_net
+
+  # ── Certbot (SSL renewal) — production only ─────────────────────
+  certbot:
+    image: certbot/certbot
+    profiles: ["production"]
+    volumes:
+      - ./infrastructure/certbot/conf:/etc/letsencrypt
+      - ./infrastructure/certbot/www:/var/www/certbot
+    entrypoint: "/bin/sh -c 'trap exit TERM; while :; do certbot renew; sleep 12h & wait $${!}; done;'"
+    networks:
+      - jarvis_net
+
+volumes:
+  postgres_data:
+  redis_data:
+
+networks:
+  jarvis_net:
+    driver: bridge

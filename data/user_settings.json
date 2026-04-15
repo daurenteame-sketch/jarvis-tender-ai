@@ -1,0 +1,12 @@
+{
+  "939648261": {
+    "enabled": true,
+    "paused": true,
+    "min_price": 30000000,
+    "keywords_include": [],
+    "keywords_exclude": [],
+    "categories": [],
+    "min_margin": 50.0,
+    "max_per_hour": 1
+  }
+}
