@@ -15,6 +15,7 @@ from typing import AsyncIterator, Optional
 
 import httpx
 import structlog
+from bs4 import BeautifulSoup
 
 logger = structlog.get_logger(__name__)
 
@@ -119,7 +120,8 @@ class GosZakupWebScraper:
     async def _fetch_announce_detail(self, announce_id: str) -> dict:
         """Fetch announce detail page for published_at, deadline_at, and document links."""
         try:
-            resp = await self._client.get(f"{ANNOUNCE_URL}/{announce_id}")
+            # The portal loads document attachments on the Документация tab.
+            resp = await self._client.get(f"{ANNOUNCE_URL}/{announce_id}?tab=documents")
             if resp.status_code != 200:
                 return {}
             return _parse_announce_detail(resp.text)
@@ -188,7 +190,7 @@ class GosZakupWebScraper:
             "customer_region": "",
             "procurement_method": first.get("procurement_method", ""),
             "lots": lots,
-            "documents": [],
+            "documents": ann_docs,
             "raw_data": {"announce_id": announce_id, "source": "web_scraper"},
         }
 
@@ -299,30 +301,54 @@ def _parse_announce_detail(html: str) -> dict:
         label = _strip_tags(label).strip()
         data[label] = value.strip()
 
-    # Extract all file attachment links from the page
+    # Extract all file attachment links from the page with BeautifulSoup for more robust coverage.
     documents: list[dict] = []
     seen_urls: set[str] = set()
-    for href in re.findall(r'href=["\']([^"\']+)["\']', html, re.IGNORECASE):
-        # Normalise to lowercase path for extension check
-        path = href.split("?")[0].lower()
-        ext = ""
+    soup = BeautifulSoup(html, 'html.parser')
+    for a in soup.find_all('a', href=True):
+        href = a['href'].strip()
+        if not href:
+            continue
+        raw_path = href.split('?')[0]
+        url = raw_path
+        if url.startswith('/'):
+            url = BASE_URL + url
+
+        ext = ''
         for e in _SPEC_EXTENSIONS:
-            if path.endswith(e):
+            if raw_path.lower().endswith(e):
                 ext = e
                 break
+
+        anchor_text = (a.get_text(separator=' ', strip=True) or '').strip()
+        if not ext and anchor_text:
+            low_text = anchor_text.lower()
+            for e in _SPEC_EXTENSIONS:
+                if low_text.endswith(e):
+                    ext = e
+                    break
+
+        if not ext:
+            title_attr = a.get('title', '')
+            if title_attr:
+                low_title = title_attr.strip().lower()
+                for e in _SPEC_EXTENSIONS:
+                    if low_title.endswith(e):
+                        ext = e
+                        break
+
         if not ext:
             continue
-        # Resolve relative URLs
-        url = (BASE_URL + href) if href.startswith("/") else href
+
         if url in seen_urls:
             continue
         seen_urls.add(url)
-        name = href.rstrip("/").split("/")[-1]
+        name = anchor_text or raw_path.rstrip('/').split('/')[-1]
         documents.append({
-            "url": url,
-            "name": name,
-            "extension": ext,
-            "is_spec": True,
+            'url': url,
+            'name': name,
+            'extension': ext,
+            'is_spec': True,
         })
 
     return {

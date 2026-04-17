@@ -11,11 +11,13 @@ import math
 import uuid
 from datetime import datetime, timezone
 from typing import Optional
+from urllib.parse import quote
 
 from fastapi import APIRouter, Depends, HTTPException, Query
 from fastapi.responses import StreamingResponse
 from sqlalchemy import select, func, and_, or_, desc, delete as sa_delete
 from sqlalchemy.ext.asyncio import AsyncSession
+import httpx
 
 from core.database import get_db
 from core.deps import get_current_user
@@ -106,6 +108,37 @@ def _days_until_deadline(deadline_at) -> Optional[int]:
     if deadline_at.tzinfo is None:
         deadline_at = deadline_at.replace(tzinfo=timezone.utc)
     return max(0, (deadline_at - now).days)
+
+
+async def _fetch_lot_document(lot: TenderLot, tender: Tender, doc_index: int):
+    documents = (lot.documents or []) + (tender.documents or [])
+    if doc_index < 0 or doc_index >= len(documents):
+        raise HTTPException(status_code=404, detail="Document not found")
+
+    doc = documents[doc_index]
+    doc_url = doc.get("url")
+    doc_name = doc.get("name") or doc.get("filename") or f"document_{doc_index}.pdf"
+
+    if not doc_url:
+        raise HTTPException(status_code=404, detail="Document URL not available")
+
+    if doc_url.startswith("//"):
+        host = "https://goszakup.gov.kz" if lot.platform == "goszakup" else "https://zakup.sk.kz"
+        doc_url = f"{host}{doc_url}"
+    elif doc_url.startswith("/"):
+        host = "https://goszakup.gov.kz" if lot.platform == "goszakup" else "https://zakup.sk.kz"
+        doc_url = f"{host}{doc_url}"
+
+    try:
+        async with httpx.AsyncClient(timeout=30, follow_redirects=True) as client:
+            response = await client.get(doc_url)
+            response.raise_for_status()
+    except Exception as exc:
+        raise HTTPException(status_code=502, detail=f"Failed to download document: {str(exc)}")
+
+    content_type = response.headers.get("content-type") or "application/octet-stream"
+    encoded_filename = quote(doc_name, safe='')
+    return response.content, content_type, encoded_filename
 
 
 # ── List lots ─────────────────────────────────────────────────────────────────
@@ -726,6 +759,7 @@ async def get_lot(
         "deadline_at": lot.deadline_at.isoformat() if lot.deadline_at else None,
         "first_seen_at": lot.first_seen_at.isoformat() if lot.first_seen_at else None,
         "documents": lot.documents,
+        "tender_documents": tender.documents,
         "is_analyzed": lot.is_analyzed,
         "is_profitable": lot.is_profitable,
         "profit_margin_percent": float(lot.profit_margin_percent) if lot.profit_margin_percent else None,
@@ -804,6 +838,101 @@ async def get_lot(
 
 
 # ── Per-lot re-analysis ───────────────────────────────────────────────────────
+
+@router.get("/{lot_id}/download/{doc_index}")
+async def download_lot_document(
+    lot_id: uuid.UUID,
+    doc_index: int,
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    """
+    Download a document attached to this lot or to its parent tender.
+    """
+    row = await db.execute(
+        select(TenderLot, Tender)
+        .join(Tender, TenderLot.tender_id == Tender.id)
+        .where(TenderLot.id == lot_id)
+    )
+    result = row.one_or_none()
+    if not result:
+        raise HTTPException(status_code=404, detail="Lot not found")
+
+    lot, tender = result
+    documents = (lot.documents or []) + (tender.documents or [])
+    if doc_index < 0 or doc_index >= len(documents):
+        raise HTTPException(status_code=404, detail="Document not found")
+
+    doc = documents[doc_index]
+    doc_url = doc.get("url")
+    doc_name = doc.get("name") or doc.get("filename") or f"document_{doc_index}.pdf"
+
+    if not doc_url:
+        raise HTTPException(status_code=404, detail="Document URL not available")
+
+    if doc_url.startswith("//"):
+        host = "https://goszakup.gov.kz" if lot.platform == "goszakup" else "https://zakup.sk.kz"
+        doc_url = f"{host}{doc_url}"
+    elif doc_url.startswith("/"):
+        host = "https://goszakup.gov.kz" if lot.platform == "goszakup" else "https://zakup.sk.kz"
+        doc_url = f"{host}{doc_url}"
+
+    try:
+        async with httpx.AsyncClient(timeout=30, follow_redirects=True) as client:
+            response = await client.get(doc_url)
+            response.raise_for_status()
+    except Exception as exc:
+        raise HTTPException(status_code=502, detail=f"Failed to download document: {str(exc)}")
+
+    content_type = response.headers.get("content-type") or "application/octet-stream"
+    encoded_filename = quote(doc_name, safe='')
+    headers = {
+        "Content-Disposition": f"attachment; filename*=UTF-8''{encoded_filename}"
+    }
+    if response.headers.get("content-length"):
+        headers["Content-Length"] = response.headers.get("content-length")
+
+    return StreamingResponse(
+        io.BytesIO(response.content),
+        media_type=content_type,
+        headers=headers,
+    )
+
+
+@router.get("/{lot_id}/view/{doc_index}")
+async def view_lot_document(
+    lot_id: uuid.UUID,
+    doc_index: int,
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    """
+    View a document attached to this lot or its parent tender inline.
+    """
+    row = await db.execute(
+        select(TenderLot, Tender)
+        .join(Tender, TenderLot.tender_id == Tender.id)
+        .where(TenderLot.id == lot_id)
+    )
+    result = row.one_or_none()
+    if not result:
+        raise HTTPException(status_code=404, detail="Lot not found")
+
+    lot, tender = result
+    content, content_type, encoded_filename = await _fetch_lot_document(lot, tender, doc_index)
+
+    headers = {
+        "Content-Disposition": f"inline; filename*=UTF-8''{encoded_filename}"
+    }
+    if content:
+        headers["Content-Length"] = str(len(content))
+
+    return StreamingResponse(
+        io.BytesIO(content),
+        media_type=content_type,
+        headers=headers,
+    )
+
 
 @router.post("/{lot_id}/reanalyze")
 async def reanalyze_lot(

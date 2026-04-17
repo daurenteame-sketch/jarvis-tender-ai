@@ -224,6 +224,30 @@ export const fetchLotDetail = async (id: string) => {
   return response.data;
 };
 
+export const downloadLotDocument = async (lotId: string, docIndex: number) => {
+  const response = await api.get(`/lots/${lotId}/download/${docIndex}`, {
+    responseType: 'blob',
+  });
+
+  const disposition = response.headers['content-disposition'] || response.headers['Content-Disposition'] || '';
+  const filenameMatch = disposition.match(/filename="?([^";]+)"?/);
+  const filename = filenameMatch ? filenameMatch[1].trim() : `lot-${lotId}-doc-${docIndex}.pdf`;
+
+  return { blob: response.data as Blob, filename };
+};
+
+export const openLotDocument = async (lotId: string, docIndex: number) => {
+  const response = await api.get(`/lots/${lotId}/view/${docIndex}`, {
+    responseType: 'blob',
+  });
+
+  const disposition = response.headers['content-disposition'] || response.headers['Content-Disposition'] || '';
+  const filenameMatch = disposition.match(/filename="?([^";]+)"?/);
+  const filename = filenameMatch ? filenameMatch[1].trim() : `lot-${lotId}-doc-${docIndex}.pdf`;
+
+  return { blob: response.data as Blob, filename };
+};
+
 export const recordAction = async (tenderId: string, action: string, data?: any) => {
   const response = await api.post(`/tenders/${tenderId}/action`, {
     tender_id: tenderId,

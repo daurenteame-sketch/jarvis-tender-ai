@@ -215,13 +215,19 @@ class GosZakupClient:
             path = (f.get("filePath") or "").strip()
             if not path:
                 continue
+            url = path.split("?")[0]
+            if url.startswith("/"):
+                url = f"https://goszakup.gov.kz{url}"
             ext_raw = f.get("extension") or ""
-            if not ext_raw and "." in path:
-                ext_raw = path.rsplit(".", 1)[-1]
+            if not ext_raw and "." in url:
+                ext_raw = url.rsplit(".", 1)[-1]
+            name = f.get("nameRu") or f.get("name") or url.split("/")[-1]
+            if not ext_raw and name and "." in name:
+                ext_raw = name.rsplit(".", 1)[-1]
             ext = ("." + ext_raw.lower().lstrip(".")) if ext_raw else ""
             docs.append({
-                "url": path,
-                "name": f.get("nameRu") or path.split("/")[-1],
+                "url": url,
+                "name": name,
                 "extension": ext,
                 "is_spec": ext in SPEC_EXTENSIONS,
             })

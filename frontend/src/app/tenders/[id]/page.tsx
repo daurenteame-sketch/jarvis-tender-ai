@@ -8,10 +8,10 @@ import {
   ShoppingCart, Search, Tag, BookOpen, RefreshCw
 } from 'lucide-react';
 import Link from 'next/link';
-import { fetchLotDetail, recordLotAction, getLotBidUrl, reanalyzeLot, reanalyzeLotFull } from '@/lib/api';
+import { fetchLotDetail, recordLotAction, getLotBidUrl, reanalyzeLot, reanalyzeLotFull, downloadLotDocument, openLotDocument } from '@/lib/api';
 import {
   formatMoney, formatDeadline, platformLabel,
-  confidenceLabel, riskColor, marginColor
+  confidenceLabel, riskColor, marginColor, platformTenderUrl
 } from '@/lib/utils';
 import { useToast } from '@/components/ui/Toast';
 
@@ -63,10 +63,16 @@ function ConfidenceBar({ value }: { value: number }) {
   );
 }
 
-function ProductCard({ resolved, analysis, characteristics: charsProp }: {
+function ProductCard({ resolved, analysis, characteristics: charsProp, documents = [], tenderDocuments = [], tender, platform, onDownloadDocument, onOpenDocument }: {
   resolved:        ResolvedProduct | null;
   analysis:        any;
   characteristics: string | null;
+  documents?:      any[];
+  tenderDocuments?: any[];
+  tender?:         any;
+  platform:        string;
+  onDownloadDocument?: (index: number) => Promise<void>;
+  onOpenDocument?: (index: number) => Promise<void>;
 }) {
   const displayName      = analysis?.normalized_name || resolved?.product_name || null;
   const hasName          = !!displayName && displayName !== 'product';
@@ -82,9 +88,32 @@ function ProductCard({ resolved, analysis, characteristics: charsProp }: {
   const possibleSuppliers: string[] = analysis?.possible_suppliers ?? [];
   const summaryText      = analysis?.ai_summary_ru || null;
   const analogs          = analysis?.analogs_allowed;
+  const lotDocuments      = documents ?? [];
+  const tenderDocs        = tenderDocuments ?? [];
+  const originalDocuments = [...lotDocuments, ...tenderDocs];
+  const specExtensions    = ['.pdf', '.doc', '.docx', '.xls', '.xlsx'];
+  const isGuaranteeDoc    = (doc: any) => {
+    const value = (doc.name || doc.filename || doc.url || '').toString().toLowerCase();
+    return /обеспечени|гарант|банков|гарантия/.test(value);
+  };
+  const visibleDocuments = originalDocuments
+    .map((doc, index) => ({ doc, index }))
+    .filter(({ doc }) => !isGuaranteeDoc(doc));
+  const hiddenGuaranteeCount = originalDocuments.length - visibleDocuments.length;
 
-  // Best display model
-  const bestModel = strictModel || aiModel || exactMatch;
+  const allDocuments = visibleDocuments;
+  const specDocuments = visibleDocuments.filter(({ doc }) => {
+    const ext = (doc.extension || doc.name || doc.filename || '').toString().toLowerCase();
+    const url = (doc.url || doc.filePath || doc.path || '').toString().toLowerCase();
+    const name = (doc.name || doc.filename || '').toString().toLowerCase();
+    return (
+      doc.is_spec ||
+      specExtensions.includes(ext) ||
+      specExtensions.some((suffix) => url.includes(suffix) || name.includes(suffix))
+    );
+  });
+  const tenderUrl = platform && tender && tender.external_id ? platformTenderUrl(platform, tender.external_id) : null;
+  const shortCharacteristics = charsProp || analysis?.characteristics || resolved?.characteristics || null;
 
   return (
     <div className="card">
@@ -120,6 +149,12 @@ function ProductCard({ resolved, analysis, characteristics: charsProp }: {
             <Tag className="w-3 h-3 text-indigo-400 shrink-0" />
             <span className="text-xs text-gray-500">Марка:</span>
             <span className="text-xs font-semibold text-indigo-700">{brand}</span>
+          </div>
+        )}
+        {shortCharacteristics && (
+          <div className="mt-2 text-sm text-gray-300 leading-relaxed">
+            <span className="text-[10px] text-gray-500 uppercase tracking-wide">Краткая характеристика: </span>
+            <span>{shortCharacteristics}</span>
           </div>
         )}
       </div>
@@ -227,6 +262,150 @@ function ProductCard({ resolved, analysis, characteristics: charsProp }: {
       </div>
 
       {/* ── Резюме AI ─────────────────────────────────────────────────── */}
+      {specDocuments.length > 0 ? (
+        <div className="rounded-lg border border-gray-700 bg-gray-800/40 p-4 mb-3">
+          <div className="flex items-center justify-between gap-3 mb-3">
+            <div>
+              <p className="text-[11px] font-semibold text-gray-500 uppercase tracking-wide">Техническая спецификация</p>
+              <p className="text-xs text-gray-400">PDF/TZ из закупочной системы</p>
+            </div>
+            <span className="text-[10px] text-gray-400">{specDocuments.length} файл{specDocuments.length === 1 ? '' : 'а'}</span>
+          </div>
+          <div className="space-y-2">
+            {specDocuments.map(({ doc, index: globalIndex }, index) => (
+                <div key={`spec-doc-${index}`} className="flex items-center justify-between gap-3 rounded-lg border border-gray-800 bg-gray-900/40 px-3 py-2">
+                  <div className="min-w-0">
+                    <p className="text-sm text-gray-200 truncate">{doc.name || doc.filename || doc.url || `Спецификация ${index + 1}`}</p>
+                    <p className="text-[10px] text-gray-500">{doc.is_spec ? 'ТЗ / PDF' : 'Документ'}</p>
+                  </div>
+                  <div className="flex items-center gap-2">
+                    <button
+                      type="button"
+                      onClick={() => onOpenDocument?.(globalIndex)}
+                      className="btn-secondary text-xs px-3 py-1"
+                    >
+                      Открыть
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => onDownloadDocument?.(globalIndex)}
+                      className="btn-secondary text-xs px-3 py-1"
+                    >
+                      Скачать
+                    </button>
+                  </div>
+                </div>
+            ))}
+          </div>
+        </div>
+      ) : allDocuments.length > 0 ? (
+        <div className="rounded-lg border border-gray-700 bg-gray-800/40 p-4 mb-3">
+          <div className="flex items-center justify-between gap-3 mb-3">
+            <div>
+              <p className="text-[11px] font-semibold text-gray-500 uppercase tracking-wide">Документы закупки</p>
+              <p className="text-xs text-gray-400">Файлы, найденные в лоте/тендере</p>
+            </div>
+            <span className="text-[10px] text-gray-400">{allDocuments.length} файл{allDocuments.length === 1 ? '' : 'а'}</span>
+          </div>
+          <div className="space-y-2">
+            {allDocuments.map(({ doc, index: globalIndex }, index) => (
+              <div key={`doc-${index}`} className="flex items-center justify-between gap-3 rounded-lg border border-gray-800 bg-gray-900/40 px-3 py-2">
+                <div className="min-w-0">
+                  <p className="text-sm text-gray-200 truncate">{doc.name || doc.filename || doc.url || `Документ ${index + 1}`}</p>
+                  <p className="text-[10px] text-gray-500">{doc.is_spec ? 'ТЗ' : 'Документ'}</p>
+                </div>
+                <div className="flex items-center gap-2">
+                  <button
+                    type="button"
+                    onClick={() => onOpenDocument?.(globalIndex)}
+                    className="btn-secondary text-xs px-3 py-1"
+                  >
+                    Открыть
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => onDownloadDocument?.(globalIndex)}
+                    className="btn-secondary text-xs px-3 py-1"
+                  >
+                    Скачать
+                  </button>
+                </div>
+              </div>
+            ))}
+          </div>
+        </div>
+      ) : (
+        <div className="rounded-lg border border-gray-700 bg-gray-800/40 p-4 mb-3">
+          <div className="flex items-center justify-between gap-3 mb-3">
+            <div>
+              <p className="text-[11px] font-semibold text-gray-500 uppercase tracking-wide">Техническая спецификация</p>
+              <p className="text-xs text-gray-400">PDF не найден. Откройте исходную закупку.</p>
+            </div>
+            <span className="text-[10px] text-gray-400">0 файлов</span>
+          </div>
+          {hiddenGuaranteeCount > 0 ? (
+            <p className="text-xs text-yellow-300 mb-3">
+              В закупке найдено только {hiddenGuaranteeCount} документ{hiddenGuaranteeCount === 1 ? '' : 'а'} обеспечения заявки, они скрыты.
+            </p>
+          ) : null}
+          {analysis?.technical_spec_text ? (
+            <div className="rounded-lg border border-gray-800 bg-gray-900/40 p-3 text-xs text-gray-300">
+              {analysis.technical_spec_text}
+            </div>
+          ) : (
+            <p className="text-xs text-gray-400">Текст спецификации не извлечён.</p>
+          )}
+        </div>
+      )}
+      {tenderUrl && (
+        <div className="mb-3">
+          <a
+            href={tenderUrl}
+            target="_blank"
+            rel="noopener noreferrer"
+            className="btn-secondary inline-flex items-center gap-2 text-xs px-3 py-2"
+          >
+            Открыть закупку на сайте
+          </a>
+        </div>
+      )}
+      {allDocuments.length > 0 && specDocuments.length === 0 && (
+        <div className="rounded-lg border border-gray-700 bg-gray-800/40 p-4 mb-3">
+          <div className="flex items-center justify-between gap-3 mb-3">
+            <div>
+              <p className="text-[11px] font-semibold text-gray-500 uppercase tracking-wide">Документы тендера</p>
+              <p className="text-xs text-gray-400">Оригинальные файлы из закупочной системы</p>
+            </div>
+            <span className="text-[10px] text-gray-400">{allDocuments.length} файл{allDocuments.length === 1 ? '' : 'а'}</span>
+          </div>
+          <div className="space-y-2">
+            {allDocuments.map(({ doc, index: globalIndex }, index) => (
+              <div key={`doc-${index}`} className="flex items-center justify-between gap-3 rounded-lg border border-gray-800 bg-gray-900/40 px-3 py-2">
+                <div className="min-w-0">
+                  <p className="text-sm text-gray-200 truncate">{doc.name || doc.filename || doc.url || `Документ ${index + 1}`}</p>
+                  <p className="text-[10px] text-gray-500">{doc.is_spec ? 'ТЗ' : 'Документ'}</p>
+                </div>
+                <div className="flex items-center gap-2">
+                  <button
+                    type="button"
+                    onClick={() => onOpenDocument?.(globalIndex)}
+                    className="btn-secondary text-xs px-3 py-1"
+                  >
+                    Открыть
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => onDownloadDocument?.(globalIndex)}
+                    className="btn-secondary text-xs px-3 py-1"
+                  >
+                    Скачать
+                  </button>
+                </div>
+              </div>
+            ))}
+          </div>
+        </div>
+      )}
       {summaryText && (
         <div className="pt-2 border-t border-gray-800">
           <p className="text-[11px] font-semibold text-gray-400 uppercase tracking-wide mb-1">Резюме</p>
@@ -388,8 +567,48 @@ export default function TenderDetailPage() {
 
   const { data: lot, isLoading, error, refetch } = useQuery({
     queryKey: ['lot', id],
-    queryFn:  () => fetchLotDetail(id),
+    queryFn:  () => fetchLotDetail(id as string),
+    enabled: !!id,
   });
+
+  const handleDownloadDocument = async (docIndex: number) => {
+    if (!id) return;
+    try {
+      const { blob, filename } = await downloadLotDocument(id, docIndex);
+      const url = window.URL.createObjectURL(blob);
+      const link = document.createElement('a');
+      link.href = url;
+      link.download = filename;
+      document.body.appendChild(link);
+      link.click();
+      link.remove();
+      window.URL.revokeObjectURL(url);
+    } catch (e: any) {
+      const msg = e?.response?.data?.detail || e?.message || String(e);
+      toast(`Ошибка скачивания: ${msg}`, 'error');
+      console.error('[downloadLotDocument] error:', e);
+    }
+  };
+
+  const handleOpenDocument = async (docIndex: number) => {
+    if (!id) return;
+    const newWindow = window.open('', '_blank');
+    if (!newWindow) {
+      toast('Не удалось открыть документ. Разрешите браузеру всплывающие окна.', 'error');
+      return;
+    }
+
+    try {
+      const { blob, filename } = await openLotDocument(id, docIndex);
+      const url = window.URL.createObjectURL(blob);
+      newWindow.location.href = url;
+    } catch (e: any) {
+      const msg = e?.response?.data?.detail || e?.message || String(e);
+      toast(`Ошибка открытия документа: ${msg}`, 'error');
+      console.error('[openLotDocument] error:', e);
+      newWindow.close();
+    }
+  };
 
   const handleAction = async (action: string) => {
     try {
@@ -648,15 +867,20 @@ export default function TenderDetailPage() {
           resolved={resolved}
           analysis={analysis}
           characteristics={(lot as any).characteristics ?? null}
+          documents={lot.documents}
+          tenderDocuments={lot.tender_documents}
+          tender={lot.tender}
+          platform={lot.platform}
+          onDownloadDocument={handleDownloadDocument}
+          onOpenDocument={handleOpenDocument}
         />
 
-        {/* Financial Analysis + Bid Strategy */}
-        {p ? (
-          <div className="card">
-            <h2 className="font-semibold mb-4 flex items-center gap-2">
-              <TrendingUp className="w-4 h-4 text-green-600" />
-              Финансовый анализ
-            </h2>
+        {/* Financial Analysis */}
+        <div className="card">
+          <h2 className="font-semibold mb-4 flex items-center gap-2">
+            <TrendingUp className="w-4 h-4 text-green-600" />
+            Финансовый анализ
+          </h2>
 
             {/* Confidence warning banner */}
             {p.confidence_score != null && p.confidence_score < 0.70 && (
