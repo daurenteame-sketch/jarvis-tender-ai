@@ -18,7 +18,8 @@ Confidence model:
   catalog                  → overall_conf = catalog["confidence"]
   hash_fallback            → overall_conf = 20
 
-Always returns exactly 3 supplier rows: Alibaba (CN), 1688 (CN), Kaspi (KZ).
+Returns 3 price-estimate rows (Alibaba, 1688, Kaspi) PLUS a `marketplace_links`
+field with 4-8 real/search product page URLs across KZ/RU/CN platforms.
 """
 from __future__ import annotations
 
@@ -34,6 +35,7 @@ from core.database import async_session_factory
 from core.config import settings
 from models.supplier import Supplier, SupplierMatch
 from modules.supplier.price_catalog import lookup_price
+from modules.supplier.product_search import get_product_links
 
 logger = structlog.get_logger(__name__)
 
@@ -167,6 +169,16 @@ class SupplierDiscoveryEngine:
         catalog_confidence: int = 0
         web_confidence = 0
         exact_match = False
+
+        # Start real marketplace product link search in background (non-blocking)
+        marketplace_links_task = asyncio.create_task(
+            get_product_links(
+                product_name=product_name,
+                characteristics=technical_params,
+                product_name_en=product_name_en,
+                max_links=8,
+            )
+        )
 
         # Step 1: Web search (with in-process cache)
         if settings.OPENAI_API_KEY:
@@ -361,6 +373,17 @@ class SupplierDiscoveryEngine:
         else:  # hash_fallback
             overall_conf = 20
 
+        # ── Collect marketplace links (real product pages + search URLs) ────────
+        marketplace_links: list[dict] = []
+        try:
+            marketplace_links = await asyncio.wait_for(marketplace_links_task, timeout=9.0)
+        except (asyncio.TimeoutError, Exception) as exc:
+            logger.warning("Marketplace links task failed", error=str(exc)[:80])
+            try:
+                marketplace_links_task.cancel()
+            except Exception:
+                pass
+
         # ── Build 3 supplier results ─────────────────────────────────────────
         search_name = web_identified_model or product_name
         name_en = web_identified_model or product_name_en or product_name
@@ -403,6 +426,7 @@ class SupplierDiscoveryEngine:
                 "web_identified_model":   web_identified_model,
                 "web_citations":          web_citations if tpl["source"] == "alibaba" else [],
                 "supplier_links":         supplier_links,
+                "marketplace_links":      marketplace_links,   # real product page links
                 "best_origin":            origin_country,
             })
 

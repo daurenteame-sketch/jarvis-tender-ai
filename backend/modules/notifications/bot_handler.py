@@ -29,7 +29,7 @@ from telegram.ext import (
 from core.config import settings
 from core.database import async_session_factory
 from core.chat_id_store import save_chat_id, load_chat_id
-from core.user_settings import get_settings, save_settings, reset_settings, settings_text, is_configured
+from core.user_settings import get_settings, save_settings, reset_settings, settings_text, is_configured, register_chat_id
 
 logger = structlog.get_logger(__name__)
 
@@ -316,7 +316,10 @@ def _settings_keyboard(chat_id: int) -> InlineKeyboardMarkup:
             InlineKeyboardButton("❌ Исключить слова", callback_data="cfg:kw_ex"),
         ],
         [
-            InlineKeyboardButton("⏱ Макс в час",  callback_data="cfg:max_per_hour"),
+            InlineKeyboardButton("🏷 Категории",    callback_data="cfg:categories"),
+            InlineKeyboardButton("⏱ Макс в час",   callback_data="cfg:max_per_hour"),
+        ],
+        [
             InlineKeyboardButton("🔄 Сброс",       callback_data="cfg:reset"),
         ],
     ])
@@ -385,6 +388,14 @@ async def _handle_settings_callback(query, context, data: str) -> None:
             "⏱ *Максимум сообщений в час*\n\nАнти-спам защита. Введите число от 1 до 100.\n_Пример: 5_",
             "Например: 5",
         ),
+        "cfg:categories": (
+            "categories",
+            "🏷 *Фильтр по категориям*\n\nВведите категории через запятую — бот будет присылать тендеры ТОЛЬКО из этих категорий.\n\n"
+            "_Доступные категории:_\n"
+            "`оргтехника, мебель, стройматериалы, медоборудование, спецодежда, топливо, продукты, транспорт, it, услуги`\n\n"
+            "Отправьте `-` чтобы получать все категории",
+            "оргтехника, мебель",
+        ),
     }
 
     if data in _PROMPTS:
@@ -426,6 +437,10 @@ async def _apply_pending_input(chat_id: int, text: str, context) -> bool:
             s.keywords_exclude = [] if text.strip() == "-" else [
                 w.strip() for w in text.split(",") if w.strip()
             ]
+        elif field_key == "categories":
+            s.categories = [] if text.strip() == "-" else [
+                w.strip().lower() for w in text.split(",") if w.strip()
+            ]
     except (ValueError, TypeError):
         error = "❌ Неверный формат. Попробуйте ещё раз."
 
@@ -447,6 +462,10 @@ async def _apply_pending_input(chat_id: int, text: str, context) -> bool:
         "kw_ex": (
             f"❌ Исключить слова: `{', '.join(s.keywords_exclude)}`"
             if s.keywords_exclude else "❌ Исключить слова: _очищено_"
+        ),
+        "categories": (
+            f"🏷 Категории: `{', '.join(s.categories)}`"
+            if s.categories else "🏷 Категории: _все_ (фильтр снят)"
         ),
     }
     confirm_line = _confirmations.get(field_key, "✅ Сохранено")
@@ -507,28 +526,32 @@ async def cmd_settings(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
 
 
 async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """Welcome message with command list."""
+    """Welcome message with command list. Registers the user for multi-user notifications."""
     chat_id = update.effective_chat.id
     global LAST_CHAT_ID
     LAST_CHAT_ID = chat_id
     save_chat_id(chat_id)
-    logger.info("incoming_chat_id", event_type="cmd_start", chat_id=chat_id)
-    await context.bot.send_message(chat_id=chat_id, text=f"🔑 Твой CHAT_ID: `{chat_id}`", parse_mode="Markdown")
+    register_chat_id(chat_id)  # adds to multi-user registry with default settings
+    logger.info("cmd_start", chat_id=chat_id)
+
     from core.user_settings import filter_mode
+    is_new = not is_configured(chat_id)
     mode = filter_mode(chat_id)
-    mode_hint = (
-        "💰 Режим: *только по цене* (от 1 000 000 тг)\n"
-        "_Добавь ключевые слова в /settings для строгой фильтрации._"
-        if mode == "price_only" else
-        "🔒 Режим: *строгий* — по цене + ключевым словам"
-    ) if is_configured(chat_id) else (
-        "⚠️ Фильтры не настроены — уведомления остановлены. Настрой через /settings."
-    )
+
+    if is_new:
+        mode_hint = (
+            "⚙️ *Настройте фильтры через /settings*, чтобы получать уведомления.\n"
+            "_По умолчанию: тендеры от 1 000 000 ₸._"
+        )
+    elif mode == "price_only":
+        mode_hint = "💰 Режим: *только по цене* (от 1 000 000 ₸)"
+    else:
+        mode_hint = "🔒 Режим: *строгий* — по цене + ключевым словам"
 
     text = (
         "🤖 *JARVIS — Тендерный ИИ-ассистент*\n"
         "─────────────────────────────\n"
-        "Я анализирую тендеры Казахстана и нахожу прибыльные возможности.\n\n"
+        "Анализирую тендеры Казахстана и нахожу прибыльные возможности.\n\n"
         f"{mode_hint}\n\n"
         "*Команды:*\n"
         "/settings — фильтры уведомлений\n"
@@ -539,7 +562,17 @@ async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         "_ноутбуки_, _медицинское оборудование_, _мебель_"
     )
     await context.bot.send_message(chat_id=chat_id, text=text, parse_mode="Markdown")
-    logger.info("cmd_start", chat_id=chat_id)
+
+    # Prompt new users to configure filters
+    if is_new:
+        keyboard = InlineKeyboardMarkup([[
+            InlineKeyboardButton("⚙️ Настроить фильтры", callback_data="cfg:show"),
+        ]])
+        await context.bot.send_message(
+            chat_id=chat_id,
+            text="👆 Нажмите, чтобы настроить под свои категории и бюджет.",
+            reply_markup=keyboard,
+        )
 
 
 async def cmd_lots(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:

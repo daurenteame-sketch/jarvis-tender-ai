@@ -12,7 +12,7 @@ from fastapi.responses import JSONResponse
 from core.config import settings
 from core.database import create_tables, check_db_connection
 from core.logging import setup_logging
-from api.routes import tenders, analytics, scan, lots, auth, users
+from api.routes import tenders, analytics, scan, lots, auth, users, procurement, suppliers as suppliers_router
 from scheduler.tasks import create_scheduler, schedule_startup_scan
 
 setup_logging()
@@ -218,6 +218,8 @@ app.include_router(tenders.router, prefix="/api/v1")
 app.include_router(lots.router, prefix="/api/v1")
 app.include_router(analytics.router, prefix="/api/v1")
 app.include_router(scan.router, prefix="/api/v1")
+app.include_router(procurement.router, prefix="/api/v1")
+app.include_router(suppliers_router.router, prefix="/api/v1")
 
 
 @app.get("/health")

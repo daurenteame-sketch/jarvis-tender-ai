@@ -418,12 +418,119 @@ function ProductCard({ resolved, analysis, characteristics: charsProp, documents
 
 // ── Suppliers Card ────────────────────────────────────────────────────────────
 
-function SuppliersCard({ suppliers, searchQuery }: { suppliers: any[]; searchQuery: string }) {
+// Platform display config for marketplace links
+const PLATFORM_CONFIG: Record<string, { color: string; badge: string }> = {
+  'Wildberries':  { color: 'text-purple-400 border-purple-500/30 hover:border-purple-400 hover:bg-purple-500/10', badge: 'bg-purple-500/15 text-purple-400' },
+  'Kaspi.kz':     { color: 'text-yellow-400 border-yellow-500/30 hover:border-yellow-400 hover:bg-yellow-500/10', badge: 'bg-yellow-500/15 text-yellow-400' },
+  'Satu.kz':      { color: 'text-green-400 border-green-500/30 hover:border-green-400 hover:bg-green-500/10', badge: 'bg-green-500/15 text-green-400' },
+  'Ozon':         { color: 'text-blue-400 border-blue-500/30 hover:border-blue-400 hover:bg-blue-500/10', badge: 'bg-blue-500/15 text-blue-400' },
+  'Alibaba.com':  { color: 'text-orange-400 border-orange-500/30 hover:border-orange-400 hover:bg-orange-500/10', badge: 'bg-orange-500/15 text-orange-400' },
+  '1688.com':     { color: 'text-red-400 border-red-500/30 hover:border-red-400 hover:bg-red-500/10', badge: 'bg-red-500/15 text-red-400' },
+  'AliExpress':   { color: 'text-orange-300 border-orange-400/30 hover:border-orange-300 hover:bg-orange-400/10', badge: 'bg-orange-400/15 text-orange-300' },
+};
+
+function MarketplaceLinksSection({ links }: { links: any[] }) {
+  if (!links || links.length === 0) return null;
+
+  const productLinks = links.filter((l: any) => l.type === 'product');
+  const searchLinks  = links.filter((l: any) => l.type !== 'product');
+
+  return (
+    <div className="mt-5 rounded-xl border border-indigo-500/25 bg-indigo-500/5 p-4">
+      <div className="flex items-center gap-2 mb-3">
+        <ShoppingCart className="w-4 h-4 text-indigo-400" />
+        <span className="font-semibold text-white text-sm">Где купить товар</span>
+        <span className="text-xs text-gray-500 ml-1">{links.length} площадок</span>
+      </div>
+
+      {/* Real product pages (from Wildberries API) */}
+      {productLinks.length > 0 && (
+        <div className="mb-3">
+          <p className="text-xs text-green-400 font-medium mb-2 flex items-center gap-1">
+            <CheckCircle className="w-3 h-3" />
+            Реальные страницы товара с фото
+          </p>
+          <div className="grid grid-cols-1 gap-1.5">
+            {productLinks.map((link: any, i: number) => {
+              const cfg = PLATFORM_CONFIG[link.platform] || { color: 'text-gray-300 border-gray-700 hover:border-gray-500 hover:bg-gray-800', badge: 'bg-gray-700 text-gray-300' };
+              return (
+                <a
+                  key={i}
+                  href={link.url}
+                  target="_blank"
+                  rel="noopener noreferrer"
+                  className={`flex items-center justify-between gap-3 px-3 py-2 rounded-lg border transition-colors ${cfg.color}`}
+                >
+                  <div className="min-w-0 flex items-center gap-2">
+                    <span className="text-sm">{flag(link.country)}</span>
+                    <div className="min-w-0">
+                      <p className="text-sm font-medium leading-tight truncate">{link.name || link.platform}</p>
+                      {link.brand && <p className="text-xs text-gray-500 truncate">{link.brand}</p>}
+                    </div>
+                  </div>
+                  <div className="flex items-center gap-2 shrink-0">
+                    {link.price_rub > 0 && (
+                      <span className="text-xs text-gray-400">{link.price_rub.toLocaleString('ru')} ₽</span>
+                    )}
+                    <span className={`text-xs px-1.5 py-0.5 rounded font-medium ${cfg.badge}`}>{link.platform}</span>
+                    <ExternalLink className="w-3 h-3 opacity-60" />
+                  </div>
+                </a>
+              );
+            })}
+          </div>
+        </div>
+      )}
+
+      {/* Search pages for other platforms */}
+      {searchLinks.length > 0 && (
+        <div>
+          {productLinks.length > 0 && (
+            <p className="text-xs text-gray-500 font-medium mb-2 flex items-center gap-1">
+              <Search className="w-3 h-3" />
+              Поиск по другим площадкам
+            </p>
+          )}
+          <div className="flex flex-wrap gap-2">
+            {searchLinks.map((link: any, i: number) => {
+              const cfg = PLATFORM_CONFIG[link.platform] || { color: 'text-gray-400 border-gray-700 hover:border-gray-500', badge: '' };
+              return (
+                <a
+                  key={i}
+                  href={link.url}
+                  target="_blank"
+                  rel="noopener noreferrer"
+                  className={`inline-flex items-center gap-1.5 px-2.5 py-1.5 rounded-lg border text-xs font-medium transition-colors ${cfg.color}`}
+                >
+                  <span>{flag(link.country)}</span>
+                  {link.platform}
+                  <ExternalLink className="w-3 h-3 opacity-50" />
+                </a>
+              );
+            })}
+          </div>
+        </div>
+      )}
+    </div>
+  );
+}
+
+function SuppliersCard({ suppliers, searchQuery, fallbackMarketplaceLinks = [] }: {
+  suppliers: any[];
+  searchQuery: string;
+  fallbackMarketplaceLinks?: any[];
+}) {
   const sorted = [...suppliers].sort(
     (a, b) => (a.unit_price_kzt ?? Infinity) - (b.unit_price_kzt ?? Infinity)
   );
   const priceMin = sorted.length > 0 ? sorted[0].unit_price_kzt : null;
   const priceMax = sorted.length > 1 ? sorted[sorted.length - 1].unit_price_kzt : null;
+
+  // marketplace_links is the same for all supplier rows — take from first supplier row
+  // or fall back to top-level lot marketplace_links (when suppliers list is empty)
+  const marketplaceLinks: any[] = sorted[0]?.marketplace_links?.length
+    ? sorted[0].marketplace_links
+    : fallbackMarketplaceLinks;
 
   return (
     <div className="card mt-5">
@@ -450,107 +557,112 @@ function SuppliersCard({ suppliers, searchQuery }: { suppliers: any[]; searchQue
           <span className="text-xs">Запустите «Пересчитать маржу» на главной странице.</span>
         </div>
       ) : (
-        <div className="space-y-3">
-          {sorted.map((s: any, i: number) => {
-            const isBest  = priceMin != null && s.unit_price_kzt === priceMin && sorted.length > 1;
-            const isWorst = priceMax != null && s.unit_price_kzt === priceMax && sorted.length > 1;
-            const isSearch = s.source_url && isSearchUrl(s.source_url);
+        <>
+          <div className="space-y-3">
+            {sorted.map((s: any, i: number) => {
+              const isBest  = priceMin != null && s.unit_price_kzt === priceMin && sorted.length > 1;
+              const isWorst = priceMax != null && s.unit_price_kzt === priceMax && sorted.length > 1;
+              const isSearch = s.source_url && isSearchUrl(s.source_url);
 
-            return (
-              <div
-                key={i}
-                className={`rounded-xl border px-4 py-3 ${
-                  isBest  ? 'border-green-500/30 bg-green-500/10' :
-                  isWorst ? 'border-red-500/25   bg-red-500/10'   :
-                            'border-gray-700     bg-gray-800/40 hover:bg-gray-800/60'
-                } transition-colors`}
-              >
-                <div className="flex items-start justify-between gap-3">
-                  {/* Left */}
-                  <div className="min-w-0">
-                    <div className="flex items-center gap-2 flex-wrap mb-1">
-                      <span className="font-semibold text-gray-200 text-sm">
-                        {s.supplier_name || '—'}
-                      </span>
-                      {isBest && (
-                        <span className="text-xs bg-green-500/15 text-green-400 border border-green-500/25 px-1.5 py-0.5 rounded font-medium">
-                          Лучшая цена
+              return (
+                <div
+                  key={i}
+                  className={`rounded-xl border px-4 py-3 ${
+                    isBest  ? 'border-green-500/30 bg-green-500/10' :
+                    isWorst ? 'border-red-500/25   bg-red-500/10'   :
+                              'border-gray-700     bg-gray-800/40 hover:bg-gray-800/60'
+                  } transition-colors`}
+                >
+                  <div className="flex items-start justify-between gap-3">
+                    {/* Left */}
+                    <div className="min-w-0">
+                      <div className="flex items-center gap-2 flex-wrap mb-1">
+                        <span className="font-semibold text-gray-200 text-sm">
+                          {s.supplier_name || '—'}
                         </span>
-                      )}
-                      {isWorst && (
-                        <span className="text-xs bg-red-500/15 text-red-400 border border-red-500/25 px-1.5 py-0.5 rounded font-medium">
-                          Дороже всех
+                        {isBest && (
+                          <span className="text-xs bg-green-500/15 text-green-400 border border-green-500/25 px-1.5 py-0.5 rounded font-medium">
+                            Лучшая цена
+                          </span>
+                        )}
+                        {isWorst && (
+                          <span className="text-xs bg-red-500/15 text-red-400 border border-red-500/25 px-1.5 py-0.5 rounded font-medium">
+                            Дороже всех
+                          </span>
+                        )}
+                      </div>
+
+                      <div className="flex items-center gap-3 text-xs text-gray-500 flex-wrap">
+                        <span>{flag(s.country)} {cname(s.country)}</span>
+                        {s.lead_time_days != null && (
+                          <span className="flex items-center gap-0.5">
+                            <Truck className="w-3 h-3" />
+                            {s.lead_time_days} дн.
+                          </span>
+                        )}
+                        <span className="flex items-center gap-1.5">
+                          <span>Совпадение:</span>
+                          <span className={`font-medium ${
+                            (s.match_score || 0) >= 0.8 ? 'text-green-400' :
+                            (s.match_score || 0) >= 0.6 ? 'text-blue-400' : 'text-gray-500'
+                          }`}>
+                            {((s.match_score || 0) * 100).toFixed(0)}%
+                          </span>
+                          <span className="w-12 bg-gray-700 rounded-full h-1 inline-block align-middle">
+                            <span
+                              className={`block h-1 rounded-full ${
+                                (s.match_score || 0) >= 0.8 ? 'bg-green-500' :
+                                (s.match_score || 0) >= 0.6 ? 'bg-blue-500' : 'bg-gray-400'
+                              }`}
+                              style={{ width: `${(s.match_score || 0) * 100}%` }}
+                            />
+                          </span>
                         </span>
-                      )}
+                      </div>
                     </div>
 
-                    <div className="flex items-center gap-3 text-xs text-gray-500 flex-wrap">
-                      <span>{flag(s.country)} {cname(s.country)}</span>
-                      {s.lead_time_days != null && (
-                        <span className="flex items-center gap-0.5">
-                          <Truck className="w-3 h-3" />
-                          {s.lead_time_days} дн.
-                        </span>
+                    {/* Right */}
+                    <div className="text-right shrink-0">
+                      <p className={`font-bold text-base ${
+                        isBest ? 'text-green-400' : isWorst ? 'text-red-400' : 'text-gray-200'
+                      }`}>
+                        {formatMoney(s.unit_price_kzt)}
+                      </p>
+                      <p className="text-xs text-gray-400 mb-2">за ед.</p>
+                      {s.source_url ? (
+                        <a
+                          href={s.source_url}
+                          target="_blank"
+                          rel="noopener noreferrer"
+                          className={`inline-flex items-center gap-1 text-xs px-2 py-1 rounded border transition-colors ${
+                            isSearch
+                              ? 'border-gray-700 text-gray-400 hover:border-gray-500'
+                              : 'border-blue-500/30 text-blue-400 hover:border-blue-400'
+                          }`}
+                        >
+                          {isSearch
+                            ? <><Search className="w-3 h-3" /> Поиск товара</>
+                            : <><ExternalLink className="w-3 h-3" /> Открыть товар</>
+                          }
+                        </a>
+                      ) : (
+                        <span className="text-gray-300 text-xs">нет ссылки</span>
                       )}
-                      <span className="flex items-center gap-1.5">
-                        <span>Совпадение:</span>
-                        <span className={`font-medium ${
-                          (s.match_score || 0) >= 0.8 ? 'text-green-400' :
-                          (s.match_score || 0) >= 0.6 ? 'text-blue-400' : 'text-gray-500'
-                        }`}>
-                          {((s.match_score || 0) * 100).toFixed(0)}%
-                        </span>
-                        <span className="w-12 bg-gray-700 rounded-full h-1 inline-block align-middle">
-                          <span
-                            className={`block h-1 rounded-full ${
-                              (s.match_score || 0) >= 0.8 ? 'bg-green-500' :
-                              (s.match_score || 0) >= 0.6 ? 'bg-blue-500' : 'bg-gray-400'
-                            }`}
-                            style={{ width: `${(s.match_score || 0) * 100}%` }}
-                          />
-                        </span>
-                      </span>
                     </div>
-                  </div>
-
-                  {/* Right */}
-                  <div className="text-right shrink-0">
-                    <p className={`font-bold text-base ${
-                      isBest ? 'text-green-400' : isWorst ? 'text-red-400' : 'text-gray-200'
-                    }`}>
-                      {formatMoney(s.unit_price_kzt)}
-                    </p>
-                    <p className="text-xs text-gray-400 mb-2">за ед.</p>
-                    {s.source_url ? (
-                      <a
-                        href={s.source_url}
-                        target="_blank"
-                        rel="noopener noreferrer"
-                        className={`inline-flex items-center gap-1 text-xs px-2 py-1 rounded border transition-colors ${
-                          isSearch
-                            ? 'border-gray-700 text-gray-400 hover:border-gray-500'
-                            : 'border-blue-500/30 text-blue-400 hover:border-blue-400'
-                        }`}
-                      >
-                        {isSearch
-                          ? <><Search className="w-3 h-3" /> Поиск товара</>
-                          : <><ExternalLink className="w-3 h-3" /> Открыть товар</>
-                        }
-                      </a>
-                    ) : (
-                      <span className="text-gray-300 text-xs">нет ссылки</span>
-                    )}
                   </div>
                 </div>
-              </div>
-            );
-          })}
-        </div>
+              );
+            })}
+          </div>
+
+          {/* Real marketplace product links section */}
+          <MarketplaceLinksSection links={marketplaceLinks} />
+        </>
       )}
 
       {sorted.length > 0 && (
         <p className="text-xs text-gray-600 mt-3 pt-3 border-t border-gray-800">
-          * Расчётные оценки на основе рыночных данных. Ссылки ведут на поиск по наименованию товара.
+          * Расчётные оценки на основе рыночных данных. Ссылки помечены: реальная страница товара или поиск.
         </p>
       )}
     </div>
@@ -722,13 +834,9 @@ export default function TenderDetailPage() {
   const resolved     = (lot.resolved_product as ResolvedProduct) || null;
   const customerName = lot.customer_name ?? lot.tender?.customer_name;
   const suppliers    = lot.suppliers || [];
+  const lotMarketplaceLinks: any[] = (lot as any).marketplace_links || [];
   const searchQuery  = resolved?.search_query || analysis?.product_name || '';
 
-  // Debug: log the full lot to verify field presence
-  console.log('[LotDetail] lot:', lot);
-  console.log('[LotDetail] characteristics (top-level):', (lot as any).characteristics);
-  console.log('[LotDetail] characteristics (resolved):', resolved?.characteristics);
-  console.log('[LotDetail] characteristics (analysis):', analysis?.characteristics);
 
   return (
     <div className="p-6 max-w-5xl">
@@ -1048,7 +1156,7 @@ export default function TenderDetailPage() {
       </div>
 
       {/* Suppliers */}
-      <SuppliersCard suppliers={suppliers} searchQuery={searchQuery} />
+      <SuppliersCard suppliers={suppliers} searchQuery={searchQuery} fallbackMarketplaceLinks={lotMarketplaceLinks} />
     </div>
   );
 }

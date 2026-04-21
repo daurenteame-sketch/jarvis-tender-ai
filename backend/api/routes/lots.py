@@ -31,6 +31,7 @@ from models.logistics import LogisticsEstimate
 from models.supplier import SupplierMatch, Supplier
 from models.user_action import UserAction
 from modules.product_resolver import resolve_product
+from modules.supplier.product_search import get_product_links
 
 router = APIRouter(prefix="/lots", tags=["lots"])
 
@@ -687,6 +688,36 @@ async def get_lot(
         flush=True,
     )
 
+    # ── Marketplace links (real product search URLs across KZ/RU/CN) ─────────
+    # Generated on-the-fly using the product name from analysis or lot title.
+    # Does NOT block — uses asyncio.wait_for with short timeout.
+    _product_name_for_links = (
+        (analysis.product_name if analysis and analysis.product_name else None)
+        or lot.title
+        or ""
+    )
+    _tech_params_for_links = (analysis.technical_params or {}) if analysis else {}
+    _product_name_en = (analysis.product_name_en or "") if analysis else ""
+
+    marketplace_links: list[dict] = []
+    try:
+        import asyncio as _asyncio
+        marketplace_links = await _asyncio.wait_for(
+            get_product_links(
+                product_name=_product_name_for_links,
+                characteristics=_tech_params_for_links,
+                product_name_en=_product_name_en,
+                max_links=8,
+            ),
+            timeout=9.0,
+        )
+    except Exception:
+        pass
+
+    # Attach marketplace_links to each supplier row so the frontend has it
+    for sup in suppliers:
+        sup["marketplace_links"] = marketplace_links
+
     # ── Buy recommendation (based on profitability) ───────────────────────────
     _margin = float(prof.profit_margin_percent) if prof and prof.profit_margin_percent is not None else None
     _expected_profit = float(prof.expected_profit) if prof and prof.expected_profit is not None else None
@@ -834,6 +865,7 @@ async def get_lot(
             "route": logistics.route,
         } if logistics else None,
         "suppliers": suppliers,
+        "marketplace_links": marketplace_links,  # available even when suppliers list is empty
     }
 
 

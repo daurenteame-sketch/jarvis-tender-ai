@@ -83,7 +83,31 @@ class TelegramNotifier:
             parts.append(f"{hours} ч.")
         return " ".join(parts) if parts else "менее часа"
 
-    def _build_message(self, tender_data: dict, profitability: dict) -> str:
+    def _build_marketplace_lines(self, marketplace_links: list) -> str:
+        """Build a short marketplace links block for Telegram messages."""
+        if not marketplace_links:
+            return ""
+        country_groups: dict[str, list] = {"KZ": [], "RU": [], "CN": []}
+        for link in marketplace_links:
+            c = link.get("country", "CN")
+            if c in country_groups:
+                country_groups[c].append(link)
+
+        flags = {"KZ": "🇰🇿", "RU": "🇷🇺", "CN": "🇨🇳"}
+        lines = []
+        for country, links in country_groups.items():
+            if not links:
+                continue
+            # show max 2 per country
+            for link in links[:2]:
+                platform = link.get("platform", "")
+                url = link.get("url", "")
+                is_product = link.get("type") == "product"
+                icon = "🟢" if is_product else "🔍"
+                lines.append(f"{flags[country]} [{platform}]({url}) {icon}")
+        return "\n".join(lines)
+
+    def _build_message(self, tender_data: dict, profitability: dict, marketplace_links: list = None) -> str:
         platform = tender_data.get("platform", "")
         platform_name = PLATFORM_NAMES.get(platform, platform.upper())
 
@@ -122,6 +146,12 @@ class TelegramNotifier:
         else:
             recommendation = "⚠️ Участвовать с осторожностью"
 
+        marketplace_block = ""
+        if marketplace_links:
+            ml_lines = self._build_marketplace_lines(marketplace_links)
+            if ml_lines:
+                marketplace_block = f"\n\n🛒 *Где купить товар:*\n{ml_lines}\n"
+
         message = (
             f"🎯 *Найден прибыльный тендер*\n"
             f"{'─' * 35}\n"
@@ -144,9 +174,9 @@ class TelegramNotifier:
             f"⏰ *До окончания:* {deadline_str}\n"
             f"\n"
             f"🎯 *Уверенность:* {confidence_emoji} {confidence_ru}\n"
-            f"⚠️ *Риск:* {risk_ru}\n"
-            f"\n"
-            f"{'─' * 35}\n"
+            f"⚠️ *Риск:* {risk_ru}"
+            f"{marketplace_block}"
+            f"\n{'─' * 35}\n"
             f"{recommendation}"
         )
 
@@ -186,12 +216,15 @@ class TelegramNotifier:
         lot_data: dict,
         lot_id: str,
         profitability: dict,
+        chat_id: Optional[str] = None,
     ) -> bool:
         """
-        Send Telegram notification for a profitable lot.
+        Send Telegram notification for a profitable lot to a specific chat_id.
+        Falls back to the globally stored chat_id when chat_id is not provided.
         Uses lot-level title and budget, falls back to tender values when absent.
         """
-        if not settings.TELEGRAM_BOT_TOKEN or not load_chat_id():
+        target = chat_id or load_chat_id()
+        if not settings.TELEGRAM_BOT_TOKEN or not target:
             logger.warning("Telegram not configured, skipping notification")
             return False
 
@@ -205,8 +238,22 @@ class TelegramNotifier:
             if lot_data.get("deadline_at"):
                 merged["deadline_at"] = lot_data["deadline_at"]
 
+            # Generate marketplace links for the product (best effort, no timeout block)
+            marketplace_links: list = []
+            try:
+                import asyncio as _asyncio
+                from modules.supplier.product_search import get_product_links
+                product_name = lot_data.get("title") or tender_data.get("title") or ""
+                if product_name:
+                    marketplace_links = await _asyncio.wait_for(
+                        get_product_links(product_name=product_name, max_links=6),
+                        timeout=5.0,
+                    )
+            except Exception:
+                pass
+
             bot = self._get_bot()
-            message = self._build_message(merged, profitability)
+            message = self._build_message(merged, profitability, marketplace_links=marketplace_links)
             tender_id = profitability.get("tender_id", "")
             keyboard = self._build_lot_keyboard(
                 lot_id=lot_id,
@@ -215,7 +262,7 @@ class TelegramNotifier:
             )
 
             await bot.send_message(
-                chat_id=load_chat_id(),
+                chat_id=int(target),
                 text=message,
                 parse_mode=ParseMode.MARKDOWN,
                 reply_markup=keyboard,
@@ -227,19 +274,65 @@ class TelegramNotifier:
                     tender_id=uuid_mod.UUID(tender_id) if tender_id else None,
                     lot_id=uuid_mod.UUID(lot_id) if lot_id else None,
                     channel="telegram",
-                    recipient=str(load_chat_id()),
+                    recipient=str(target),
                     message=message,
                     status="sent",
                 )
                 session.add(notif)
                 await session.commit()
 
-            logger.info("Telegram lot alert sent", lot_id=lot_id[:8] if lot_id else None)
+            logger.info("Telegram lot alert sent", lot_id=lot_id[:8] if lot_id else None, chat_id=str(target)[-4:])
             return True
 
         except Exception as exc:
             logger.error("Failed to send Telegram lot alert", error=str(exc))
             return False
+
+    async def send_to_all_matching_users(
+        self,
+        tender_data: dict,
+        lot_data: dict,
+        lot_id: str,
+        profitability: dict,
+    ) -> int:
+        """
+        Broadcast a profitable lot alert to ALL registered users whose filters match.
+        Returns the number of users successfully notified.
+        """
+        from core.user_settings import get_all_chat_ids, tender_matches, can_send
+
+        chat_ids = get_all_chat_ids()
+        if not chat_ids:
+            # Fallback: send to globally stored chat_id
+            sent = await self.send_lot_alert(tender_data, lot_data, lot_id, profitability)
+            return 1 if sent else 0
+
+        # Build the tender dict for filter matching
+        tender_filter_data = {
+            "title":          lot_data.get("title") or tender_data.get("title", ""),
+            "price":          float(lot_data.get("budget") or tender_data.get("budget") or 0),
+            "margin_percent": float(profitability.get("profit_margin_percent") or 0),
+            "category":       lot_data.get("category") or tender_data.get("category", ""),
+        }
+
+        notified = 0
+        for cid in chat_ids:
+            try:
+                if not tender_matches(tender_filter_data, cid):
+                    continue
+                if not can_send(cid):
+                    logger.debug("Rate limit hit, skipping", chat_id=str(cid)[-4:])
+                    continue
+                sent = await self.send_lot_alert(
+                    tender_data, lot_data, lot_id, profitability, chat_id=cid
+                )
+                if sent:
+                    notified += 1
+            except Exception as exc:
+                logger.error("Failed to notify user", chat_id=str(cid)[-4:], error=str(exc))
+
+        logger.info("Broadcast complete", total_users=len(chat_ids), notified=notified)
+        return notified
 
     async def send_tender_alert(
         self,

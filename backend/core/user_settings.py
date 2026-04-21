@@ -74,6 +74,20 @@ def reset_settings(chat_id: int | str) -> UserSettings:
     return s
 
 
+def get_all_chat_ids() -> list[str]:
+    """Return all registered chat_ids (everyone who sent /start)."""
+    return list(_load_all().keys())
+
+
+def register_chat_id(chat_id: int | str) -> None:
+    """Register a new chat_id with default settings if not already present."""
+    key = str(chat_id)
+    data = _load_all()
+    if key not in data:
+        data[key] = asdict(UserSettings())
+        _save_all(data)
+
+
 def is_configured(chat_id: int | str) -> bool:
     """
     Returns False only when min_price == 0 (filters explicitly cleared).
@@ -126,7 +140,13 @@ def tender_matches(tender: dict, chat_id: int | str) -> bool:
         if any(kw.lower() in title_lower for kw in s.keywords_exclude):
             return False
 
-    # 6. Минимальная маржа (0 = не фильтровать)
+    # 6. Фильтр по категориям (если задан)
+    if s.categories:
+        tender_category = (tender.get("category") or "").lower()
+        if not any(cat in tender_category or tender_category in cat for cat in s.categories):
+            return False
+
+    # 7. Минимальная маржа (0 = не фильтровать)
     margin = tender.get("margin_percent", 100.0)
     if margin < s.min_margin:
         return False
@@ -175,6 +195,7 @@ def settings_text(chat_id: int | str) -> str:
 
     kw_in = "`" + ", ".join(s.keywords_include) + "`" if s.keywords_include else "_не заданы_"
     kw_ex = "`" + ", ".join(s.keywords_exclude) + "`" if s.keywords_exclude else "нет"
+    cats  = "`" + ", ".join(s.categories) + "`" if s.categories else "_все_"
 
     return (
         f"⚙️ *Настройки уведомлений*\n"
@@ -182,6 +203,7 @@ def settings_text(chat_id: int | str) -> str:
         f"📡 Поток: {stream}\n"
         f"🎯 Режим: {mode_str}\n"
         f"💰 Мин. сумма: {price_str}\n"
+        f"🏷 Категории: {cats}\n"
         f"🔍 Включить слова: {kw_in}\n"
         f"❌ Исключить слова: {kw_ex}\n"
         f"📊 Мин. маржа: *{s.min_margin:.0f}%*\n"

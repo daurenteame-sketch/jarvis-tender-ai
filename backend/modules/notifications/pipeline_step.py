@@ -41,22 +41,17 @@ async def notification_step(ctx: PipelineContext) -> None:
         logger.debug("Notification already sent, skipping", lot_id=ctx.lot_id[:8])
         return
 
-    # ── Apply user filter preferences ───────────────────────────────────────
-    if not await _passes_user_filters(ctx):
-        logger.debug("Lot filtered out by user preferences", lot_id=ctx.lot_id[:8])
-        return
-
     notifier = _get_notifier()
-    sent = await notifier.send_lot_alert(
+    notified = await notifier.send_to_all_matching_users(
         tender_data=ctx.tender_data,
         lot_data=ctx.lot_data,
         lot_id=ctx.lot_id,
         profitability=profitability,
     )
 
-    if sent:
+    if notified > 0:
         await _mark_notified(ctx.lot_id)
-        logger.info("Notification sent for profitable lot", lot_id=ctx.lot_id[:8])
+        logger.info("Notification sent for profitable lot", lot_id=ctx.lot_id[:8], users=notified)
 
 
 async def _passes_user_filters(ctx: PipelineContext) -> bool:

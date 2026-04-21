@@ -12,18 +12,38 @@ import {
   LogOut,
   User,
   ChevronDown,
+  CreditCard,
+  CalendarDays,
+  BookOpen,
 } from 'lucide-react';
 import { cn } from '@/lib/utils';
 import { useAuth } from '@/contexts/AuthContext';
 import { useState } from 'react';
 
-const NAV_ITEMS = [
-  { href: '/dashboard', label: 'Дашборд', icon: LayoutDashboard },
-  { href: '/tenders', label: 'Тендеры', icon: FileSearch },
-  { href: '/analytics', label: 'Аналитика', icon: BarChart3 },
-  { href: '/suppliers', label: 'Поставщики', icon: Truck },
-  { href: '/history', label: 'История', icon: History },
-  { href: '/settings', label: 'Настройки', icon: Settings },
+const NAV_GROUPS = [
+  {
+    label: 'Основное',
+    items: [
+      { href: '/dashboard',  label: 'Дашборд',   icon: LayoutDashboard },
+      { href: '/tenders',    label: 'Тендеры',    icon: FileSearch },
+      { href: '/analytics',  label: 'Аналитика',  icon: BarChart3 },
+      { href: '/suppliers',  label: 'Поставщики', icon: Truck },
+    ],
+  },
+  {
+    label: 'Закупки',
+    items: [
+      { href: '/procurement-plan',  label: 'План закупок',    icon: CalendarDays },
+      { href: '/purchase-history',  label: 'История закупок', icon: History },
+    ],
+  },
+  {
+    label: 'Аккаунт',
+    items: [
+      { href: '/pricing',   label: 'Тарифы',     icon: CreditCard },
+      { href: '/settings',  label: 'Настройки',  icon: Settings },
+    ],
+  },
 ];
 
 const PLAN_BADGE: Record<string, { label: string; color: string }> = {
@@ -46,6 +66,9 @@ export function Sidebar() {
     ? user.email.slice(0, 2).toUpperCase()
     : '??';
 
+  const isActive = (href: string) =>
+    pathname === href || (href !== '/dashboard' && pathname.startsWith(href));
+
   return (
     <aside className="w-64 bg-gray-900 text-white flex flex-col min-h-screen border-r border-gray-800">
       {/* Logo */}
@@ -62,25 +85,31 @@ export function Sidebar() {
       </div>
 
       {/* Navigation */}
-      <nav className="flex-1 p-4 space-y-1">
-        {NAV_ITEMS.map(({ href, label, icon: Icon }) => {
-          const isActive = pathname === href || (href !== '/dashboard' && pathname.startsWith(href));
-          return (
-            <Link
-              key={href}
-              href={href}
-              className={cn(
-                'flex items-center gap-3 px-4 py-2.5 rounded-lg text-sm font-medium transition-colors',
-                isActive
-                  ? 'bg-blue-600 text-white'
-                  : 'text-gray-400 hover:bg-gray-800 hover:text-white'
-              )}
-            >
-              <Icon className="w-4 h-4" />
-              {label}
-            </Link>
-          );
-        })}
+      <nav className="flex-1 p-4 space-y-5 overflow-y-auto">
+        {NAV_GROUPS.map(group => (
+          <div key={group.label}>
+            <p className="text-xs font-semibold text-gray-600 uppercase tracking-wider px-3 mb-1.5">
+              {group.label}
+            </p>
+            <div className="space-y-0.5">
+              {group.items.map(({ href, label, icon: Icon }) => (
+                <Link
+                  key={href}
+                  href={href}
+                  className={cn(
+                    'flex items-center gap-3 px-3 py-2.5 rounded-lg text-sm font-medium transition-colors',
+                    isActive(href)
+                      ? 'bg-blue-600 text-white'
+                      : 'text-gray-400 hover:bg-gray-800 hover:text-white'
+                  )}
+                >
+                  <Icon className="w-4 h-4 shrink-0" />
+                  {label}
+                </Link>
+              ))}
+            </div>
+          </div>
+        ))}
       </nav>
 
       {/* User section */}
@@ -89,18 +118,15 @@ export function Sidebar() {
           onClick={() => setShowUserMenu(!showUserMenu)}
           className="w-full flex items-center gap-3 px-3 py-2 rounded-lg hover:bg-gray-800 transition-colors"
         >
-          {/* Avatar */}
           <div className="w-8 h-8 rounded-full bg-blue-700 flex items-center justify-center text-xs font-bold shrink-0">
             {initials}
           </div>
-
           <div className="flex-1 text-left min-w-0">
             <p className="text-sm font-medium text-white truncate">
               {user?.company_name || user?.email || '—'}
             </p>
             <p className="text-xs text-gray-400 truncate">{user?.email}</p>
           </div>
-
           <ChevronDown
             className={cn(
               'w-4 h-4 text-gray-500 transition-transform shrink-0',
@@ -109,10 +135,8 @@ export function Sidebar() {
           />
         </button>
 
-        {/* Dropdown */}
         {showUserMenu && (
           <div className="mt-2 bg-gray-800 border border-gray-700 rounded-lg overflow-hidden">
-            {/* Plan badge */}
             <div className="px-4 py-2 border-b border-gray-700 flex items-center justify-between">
               <span className="text-xs text-gray-400">Тариф</span>
               <span className={cn('text-xs font-semibold px-2 py-0.5 rounded-full', badge.color)}>
@@ -127,6 +151,15 @@ export function Sidebar() {
             >
               <User className="w-4 h-4" />
               Профиль и настройки
+            </Link>
+
+            <Link
+              href="/pricing"
+              onClick={() => setShowUserMenu(false)}
+              className="flex items-center gap-2 px-4 py-2.5 text-sm text-gray-300 hover:bg-gray-700 hover:text-white transition-colors"
+            >
+              <CreditCard className="w-4 h-4" />
+              Тарифы
             </Link>
 
             <button

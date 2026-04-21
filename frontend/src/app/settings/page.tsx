@@ -3,8 +3,9 @@ import { useState, useEffect } from 'react';
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query';
 import {
   Settings, Bell, Filter, CreditCard, CheckCircle, Clock,
-  Plus, X, Zap, Star, Building2, AlertCircle, ChevronRight,
+  Plus, X, Zap, Star, Building2, AlertCircle, ChevronRight, ExternalLink,
 } from 'lucide-react';
+import Link from 'next/link';
 import {
   getUserSettings, saveUserSettings, getSubscription, activateTrial,
   type FilterSettings, type NotificationSettings,
@@ -171,119 +172,39 @@ export default function SettingsPage() {
         </div>
       </div>
 
-      {/* ── Subscription ──────────────────────────────────────────────────── */}
+      {/* ── Subscription compact widget ──────────────────────────────────── */}
       <div className={cn(
-        'rounded-xl border-2 p-6',
+        'rounded-xl border-2 p-5 flex items-center justify-between gap-4',
         plan === 'pro'        ? 'border-green-500/40 bg-green-500/5' :
         plan === 'enterprise' ? 'border-purple-500/40 bg-purple-500/5' :
         plan === 'trial'      ? 'border-blue-500/40 bg-blue-500/5' :
                                 'border-gray-700 bg-gray-900'
       )}>
-        <div className="flex items-start justify-between gap-4">
-          <div className="flex items-center gap-3">
-            <CreditCard className={cn('w-5 h-5', plan === 'pro' ? 'text-green-400' : plan === 'trial' ? 'text-blue-400' : 'text-gray-500')} />
-            <div>
-              <div className="flex items-center gap-2">
-                <span className="font-semibold text-white">Ваш тариф</span>
-                <PlanBadge plan={plan} />
-              </div>
-              {subscription?.days_left != null && (
-                <p className="text-sm text-gray-400 mt-0.5">
-                  Осталось дней: <strong className="text-gray-200">{subscription.days_left}</strong>
-                  {plan === 'trial' && <span className="text-gray-500"> (пробный период)</span>}
-                </p>
-              )}
-              {plan === 'free' && (
-                <p className="text-sm text-gray-500 mt-0.5">
-                  До {subscription?.limits?.lots_per_day} лотов в день · базовая аналитика
-                </p>
-              )}
+        <div className="flex items-center gap-3">
+          <CreditCard className={cn('w-5 h-5', plan === 'pro' ? 'text-green-400' : plan === 'trial' ? 'text-blue-400' : 'text-gray-500')} />
+          <div>
+            <div className="flex items-center gap-2">
+              <span className="font-semibold text-white">Ваш тариф</span>
+              <PlanBadge plan={plan} />
             </div>
-          </div>
-
-          <div className="flex gap-2 flex-wrap justify-end shrink-0">
-            {plan === 'free' && !subscription?.trial_used && (
-              <button
-                onClick={() => trialMutation.mutate()}
-                disabled={trialMutation.isPending}
-                className="flex items-center gap-1.5 bg-blue-600 hover:bg-blue-500 text-white text-sm font-medium px-3 py-1.5 rounded-lg transition-colors disabled:opacity-50"
-              >
-                <Zap className="w-3.5 h-3.5" />
-                {trialMutation.isPending ? 'Активация...' : 'Попробовать Pro'}
-              </button>
+            {subscription?.days_left != null && (
+              <p className="text-sm text-gray-400 mt-0.5">
+                Осталось: <strong className="text-gray-200">{subscription.days_left} дн.</strong>
+                {plan === 'trial' && <span className="text-gray-500"> (пробный)</span>}
+              </p>
             )}
-            {plan !== 'pro' && plan !== 'enterprise' && (
-              <a
-                href="https://t.me/jarvis_tender_kz"
-                target="_blank"
-                rel="noreferrer"
-                className="flex items-center gap-1.5 text-sm font-medium px-3 py-1.5 rounded-lg border border-gray-700 text-gray-400 hover:bg-gray-800 transition-colors"
-              >
-                {plan === 'trial' ? <><Star className="w-3.5 h-3.5" />Купить Pro</> : 'О Pro'}
-                <ChevronRight className="w-3.5 h-3.5" />
-              </a>
+            {plan === 'free' && (
+              <p className="text-sm text-gray-500 mt-0.5">До {subscription?.limits?.lots_per_day} лотов в день</p>
             )}
           </div>
         </div>
-
-        {/* Feature list */}
-        {(subscription?.features || []).length > 0 && (
-          <div className="mt-4 grid grid-cols-2 gap-2">
-            {(subscription?.features || []).map((f: string) => (
-              <div key={f} className="flex items-center gap-1.5 text-sm text-gray-400">
-                <CheckCircle className="w-3.5 h-3.5 text-green-500 shrink-0" />
-                {f}
-              </div>
-            ))}
-          </div>
-        )}
-      </div>
-
-      {/* ── Pricing cards ─────────────────────────────────────────────────── */}
-      <div className="grid grid-cols-1 sm:grid-cols-3 gap-3">
-        {[
-          {
-            name: 'Free', price: '0 ₸/мес', color: 'border-gray-700',
-            features: ['5 лотов в день', 'Базовая аналитика', 'Telegram уведомления'],
-            cta: null, active: plan === 'free',
-          },
-          {
-            name: 'Pro', price: '9 900 ₸/мес', color: 'border-blue-500/40',
-            features: ['Без лимитов', 'AI-анализ всех лотов', 'Email + Telegram', 'Фильтры по ключевым словам', 'Экспорт в Excel'],
-            cta: 'https://t.me/jarvis_tender_kz', active: plan === 'pro' || plan === 'trial',
-          },
-          {
-            name: 'Enterprise', price: 'По запросу', color: 'border-purple-500/30',
-            features: ['Несколько пользователей', 'API доступ', 'Выделенный менеджер', 'Кастомные интеграции'],
-            cta: 'https://t.me/jarvis_tender_kz', active: plan === 'enterprise',
-          },
-        ].map(p => (
-          <div key={p.name} className={cn('rounded-xl border p-4 bg-gray-900 relative', p.color, p.active && 'ring-1 ring-offset-0 ring-offset-gray-950')}>
-            {p.active && (
-              <span className="absolute -top-2 left-3 text-[10px] font-bold bg-blue-600 text-white px-2 py-0.5 rounded-full">
-                Ваш план
-              </span>
-            )}
-            <p className="font-bold text-white text-base">{p.name}</p>
-            <p className="text-blue-400 font-semibold text-sm mt-0.5 mb-3">{p.price}</p>
-            <ul className="space-y-1.5">
-              {p.features.map(f => (
-                <li key={f} className="flex items-center gap-1.5 text-xs text-gray-400">
-                  <CheckCircle className="w-3 h-3 text-green-500 shrink-0" />
-                  {f}
-                </li>
-              ))}
-            </ul>
-            {p.cta && !p.active && (
-              <a
-                href={p.cta} target="_blank" rel="noreferrer"
-                className="mt-3 block w-full text-center py-1.5 rounded-lg bg-blue-600/20 border border-blue-500/30 text-blue-400 text-xs font-medium hover:bg-blue-600/30 transition-colors"
-              >
-                Подключить
-              </a>
-            )}
-          </div>
-        ))}
+        <Link
+          href="/pricing"
+          className="flex items-center gap-1.5 text-sm font-medium px-3 py-2 rounded-lg border border-gray-700 text-gray-400 hover:bg-gray-800 hover:text-white transition-colors shrink-0"
+        >
+          Все тарифы
+          <ChevronRight className="w-3.5 h-3.5" />
+        </Link>
       </div>
 
       {/* ── Platforms ─────────────────────────────────────────────────────── */}

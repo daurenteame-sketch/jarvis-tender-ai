@@ -359,6 +359,27 @@ def _ensure_characteristics(
     return ""
 
 
+# ── Quota circuit breaker ──────────────────────────────────────────────────────
+# When OpenAI returns 429 / insufficient_quota, we mark the key as exhausted
+# for QUOTA_BACKOFF_SECONDS so subsequent calls skip the API entirely and fall
+# through to the catalog / hash fallback — avoiding pointless round-trips.
+
+import time as _time
+
+_quota_exhausted_until: float = 0.0          # epoch seconds
+_QUOTA_BACKOFF_SECONDS: float = 3600.0       # retry after 1 hour
+
+
+def _is_quota_exhausted() -> bool:
+    return _time.monotonic() < _quota_exhausted_until
+
+
+def _mark_quota_exhausted() -> None:
+    global _quota_exhausted_until
+    _quota_exhausted_until = _time.monotonic() + _QUOTA_BACKOFF_SECONDS
+    logger.warning("OpenAI quota exhausted — disabling for 1 hour")
+
+
 class OpenAIClient:
     def __init__(self):
         self.client = AsyncOpenAI(api_key=settings.OPENAI_API_KEY)
@@ -419,6 +440,10 @@ CRITICAL RULES:
 
 If a field is not mentioned in the specification, use null."""
 
+        if _is_quota_exhausted():
+            logger.debug("analyze_tender_specification skipped — quota exhausted")
+            return self._default_analysis(title)
+
         try:
             print(f"OPENAI REQUEST SENT: analyze_tender_specification | model={self.model} | title={title[:60]}", flush=True)
             response = await self.client.chat.completions.create(
@@ -441,7 +466,10 @@ If a field is not mentioned in the specification, use null."""
             logger.error("Failed to parse AI response as JSON", error=str(e))
             return self._default_analysis(title)
         except Exception as e:
-            logger.error("OpenAI API error", error=str(e))
+            err_str = str(e)
+            if "insufficient_quota" in err_str or "429" in err_str:
+                _mark_quota_exhausted()
+            logger.error("OpenAI API error", error=err_str[:120])
             return self._default_analysis(title)
 
     async def identify_product(
@@ -675,6 +703,10 @@ If a field is not mentioned in the specification, use null."""
         }
 
         # ── 5. Call API ──────────────────────────────────────────────────────
+        if _is_quota_exhausted():
+            logger.debug("identify_product skipped — quota exhausted")
+            return _fallback
+
         try:
             print(
                 f"[identify_product] → API request | model={self.model} | "
@@ -810,7 +842,10 @@ If a field is not mentioned in the specification, use null."""
             logger.error("identify_product: JSON parse error", error=str(e))
             return _fallback
         except Exception as e:
-            logger.error("identify_product: API error", error=str(e))
+            err_str = str(e)
+            if "insufficient_quota" in err_str or "429" in err_str:
+                _mark_quota_exhausted()
+            logger.error("identify_product: API error", error=err_str[:120])
             return _fallback
 
     async def search_product_web(
@@ -875,6 +910,10 @@ If a field is not mentioned in the specification, use null."""
 }}
 ```
 Заполни все поля реальными данными. null = не найдено на этом рынке."""
+
+        if _is_quota_exhausted():
+            logger.debug("search_product_web skipped — quota exhausted")
+            return {}
 
         try:
             response = await self.client.chat.completions.create(
@@ -989,7 +1028,10 @@ If a field is not mentioned in the specification, use null."""
         except asyncio.CancelledError:
             raise
         except Exception as e:
-            logger.error("Web product search failed", error=str(e))
+            err_str = str(e)
+            if "insufficient_quota" in err_str or "429" in err_str:
+                _mark_quota_exhausted()
+            logger.error("Web product search failed", error=err_str[:120])
             return {}
 
     async def search_suppliers_ai(
@@ -1063,6 +1105,10 @@ If a field is not mentioned in the specification, use null."""
   "notes": "обоснование цены и источника"
 }}"""
 
+        if _is_quota_exhausted():
+            logger.debug("search_suppliers_ai skipped — quota exhausted")
+            return {}
+
         try:
             response = await self.client.chat.completions.create(
                 model=self.model,
@@ -1089,7 +1135,10 @@ If a field is not mentioned in the specification, use null."""
                   flush=True)
             return raw
         except Exception as e:
-            logger.error("Supplier AI search failed", error=str(e))
+            err_str = str(e)
+            if "insufficient_quota" in err_str or "429" in err_str:
+                _mark_quota_exhausted()
+            logger.error("Supplier AI search failed", error=err_str[:120])
             return {}
 
     async def generate_bid_proposal(
