@@ -13,6 +13,18 @@ from core.config import settings
 logger = structlog.get_logger(__name__)
 
 
+def _guard_call(model: str) -> None:
+    """
+    Pre-flight check before every OpenAI request.
+    In DEV_MODE this enforces DEV_MAX_OPENAI_REQUESTS_PER_RUN and DEV_BUDGET_HARD_USD
+    across ALL call sites (analyze, identify, search_product_web, supplier_ai, …),
+    not just the batch pipeline. No-op when DEV_MODE=false.
+    DevModeLimitError propagates to abort the call.
+    """
+    from modules.ai_analyzer.cost_tracker import get_run_guard
+    get_run_guard().check_and_increment(model)
+
+
 # ── Regex fallback: extract numbers + units from raw text ─────────────────────
 
 # Pass 1 — number followed by a known unit
@@ -445,6 +457,7 @@ If a field is not mentioned in the specification, use null."""
             return self._default_analysis(title)
 
         try:
+            _guard_call(self.model)
             print(f"OPENAI REQUEST SENT: analyze_tender_specification | model={self.model} | title={title[:60]}", flush=True)
             response = await self.client.chat.completions.create(
                 model=self.model,
@@ -708,6 +721,7 @@ If a field is not mentioned in the specification, use null."""
             return _fallback
 
         try:
+            _guard_call(self.model)
             print(
                 f"[identify_product] → API request | model={self.model} | "
                 f"prompt_body={len(prompt_body)} chars",
@@ -916,6 +930,7 @@ If a field is not mentioned in the specification, use null."""
             return {}
 
         try:
+            _guard_call(settings.OPENAI_SEARCH_MODEL)
             response = await self.client.chat.completions.create(
                 model=settings.OPENAI_SEARCH_MODEL,
                 messages=[{"role": "user", "content": search_prompt}],
@@ -1110,6 +1125,7 @@ If a field is not mentioned in the specification, use null."""
             return {}
 
         try:
+            _guard_call(self.model)
             response = await self.client.chat.completions.create(
                 model=self.model,
                 messages=[
@@ -1173,6 +1189,7 @@ Company name: {company_name}
 Keep it professional, concise, and compliant with Kazakhstan public procurement requirements."""
 
         try:
+            _guard_call(self.model)
             response = await self.client.chat.completions.create(
                 model=self.model,
                 messages=[
@@ -1203,6 +1220,7 @@ Description: {description[:500] if description else ''}
 Respond with JSON: {{"category": "product|software_service|other", "confidence": 0.0-1.0}}"""
 
         try:
+            _guard_call(self.model)
             response = await self.client.chat.completions.create(
                 model=self.model,
                 messages=[{"role": "user", "content": prompt}],
@@ -1235,6 +1253,7 @@ Respond with JSON: {{"category": "product|software_service|other", "confidence":
         if any(word in user_message.lower() for word in ["привет", "hello", "hi"]):
             return None
         try:
+            _guard_call(self.model)
             response = await self.client.chat.completions.create(
                 model=self.model,
                 messages=[

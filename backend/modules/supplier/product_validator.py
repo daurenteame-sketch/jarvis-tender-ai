@@ -191,6 +191,11 @@ async def validate_products(
         if _is_quota_exhausted():
             raise RuntimeError("openai quota exhausted — using heuristic fallback")
 
+        # Honor DEV_MODE budget across this call too. DevModeLimitError will
+        # propagate and trigger the heuristic fallback path below.
+        from integrations.openai_client.client import _guard_call
+        _guard_call("gpt-4o-mini")
+
         client = AsyncOpenAI(api_key=settings.OPENAI_API_KEY)
         try:
             resp = await client.chat.completions.create(

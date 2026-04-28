@@ -16,7 +16,7 @@ from models.tender_lot import TenderLot
 from models.tender_lot_analysis import TenderLotAnalysis
 from modules.scanner.pipeline import ScannerPipeline, PipelineContext
 from modules.ai_analyzer.category_classifier import CategoryClassifier
-from modules.ai_analyzer.cost_tracker import DevModeLimitError, get_run_guard
+from modules.ai_analyzer.cost_tracker import DevModeLimitError  # noqa: F401  (DevModeLimitError raised inside OpenAIClient via _guard_call)
 from integrations.openai_client.client import OpenAIClient, _ensure_characteristics
 
 logger = structlog.get_logger(__name__)
@@ -135,11 +135,11 @@ async def ai_analysis_step(ctx: PipelineContext) -> None:
         await _save_lot_category(ctx.lot_id, ctx.category)
         return
 
-    guard = get_run_guard()
+    # Cost guard is applied inside OpenAIClient._guard_call now (one place
+    # for all call sites). pipeline_step only handles polite throttling.
     model = settings.OPENAI_MODEL or "gpt-4o"
 
     # ── Step 3a: product identification — uses full merged text ─────────────
-    guard.check_and_increment(model)  # raises DevModeLimitError if limit hit
     if settings.DEV_MODE:
         await asyncio.sleep(settings.DEV_OPENAI_DELAY_S)
     product_id = await _ai_client.identify_product(
@@ -149,7 +149,6 @@ async def ai_analysis_step(ctx: PipelineContext) -> None:
     )
 
     # ── Step 3b: full AI analysis (category, tech_params, profitability) ────
-    guard.check_and_increment(model)  # raises DevModeLimitError if limit hit
     if settings.DEV_MODE:
         await asyncio.sleep(settings.DEV_OPENAI_DELAY_S)
     ai_result = await _ai_client.analyze_tender_specification(
