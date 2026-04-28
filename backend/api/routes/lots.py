@@ -591,7 +591,7 @@ async def get_lot(
             import asyncio as _aio
             tech_text, raw_text, pdf_url = await _aio.wait_for(
                 _refresh_spec_text(lot, tender, force=False),
-                timeout=20.0,
+                timeout=30.0,
             )
             updated = False
             if tech_text and len(tech_text.strip()) > 50:
@@ -1215,7 +1215,7 @@ async def _refresh_spec_text(lot: TenderLot, tender: Tender, force: bool = False
     if not force:
         existing = (lot.technical_spec_text or "").strip()
         if len(existing) > 200:
-            return existing, (getattr(lot, "raw_spec_text", None) or "")
+            return existing, (getattr(lot, "raw_spec_text", None) or ""), getattr(lot, "techspec_pdf_url", None)
 
     raw_parts: list[str] = []
     description = (lot.description or "").strip()
@@ -1234,23 +1234,31 @@ async def _refresh_spec_text(lot: TenderLot, tender: Tender, force: bool = False
     async with httpx.AsyncClient(timeout=40, follow_redirects=True, headers=headers) as client:
         spec_docs: list[dict] = []
 
-        # When force=True (full reanalysis): always re-fetch from goszakup page to get clean list
-        if force and tender and tender.external_id and (lot.platform or "goszakup") == "goszakup":
-            fetched = await _fetch_goszakup_docs(
-                tender.external_id, client, lot_external_id=lot.lot_external_id
-            )
-            clean = [d for d in fetched if not _is_guarantee_doc(d)]
-            # Prefer the file that exactly matches this lot — download only that one
-            matched = [d for d in clean if d.get("lot_match")]
-            spec_docs = matched[:1] if matched else clean[:1]
+        # 1) Prefer DB documents (cheap, no extra HTTP)
+        all_docs: list[dict] = []
+        for src in (lot.documents, tender.documents if tender else None):
+            if src and isinstance(src, list):
+                all_docs.extend(src)
+        spec_docs = [d for d in all_docs if d.get("url") and not _is_guarantee_doc(d)]
 
-        # Fallback: use DB documents if goszakup fetch returned nothing
-        if not spec_docs:
-            all_docs: list[dict] = []
-            for src in (lot.documents, tender.documents if tender else None):
-                if src and isinstance(src, list):
-                    all_docs.extend(src)
-            spec_docs = [d for d in all_docs if d.get("url") and not _is_guarantee_doc(d)][:1]
+        # 2) When force=True OR DB docs are empty: re-fetch live from goszakup
+        # This is what makes auto-extract reliable for new lots whose `documents`
+        # array is empty after a fresh scan.
+        if (force or not spec_docs) and tender and tender.external_id and (lot.platform or "goszakup") == "goszakup":
+            try:
+                fetched = await _fetch_goszakup_docs(
+                    tender.external_id, client, lot_external_id=lot.lot_external_id
+                )
+                clean = [d for d in fetched if not _is_guarantee_doc(d)]
+                matched = [d for d in clean if d.get("lot_match")]
+                refetched = matched[:1] if matched else clean[:1]
+                if refetched:
+                    spec_docs = refetched
+            except Exception as exc:
+                print(f"[refresh_spec_text] goszakup re-fetch error: {exc}", flush=True)
+
+        # Cap to single best doc — extracting many is slow and rarely adds info
+        spec_docs = spec_docs[:1]
 
         print(
             f"[refresh_spec_text] lot={lot.id} | spec_docs={len(spec_docs)} to download",

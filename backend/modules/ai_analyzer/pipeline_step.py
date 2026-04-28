@@ -257,6 +257,26 @@ async def _save_lot_analysis(
             except (TypeError, ValueError):
                 norm_conf = None
 
+        # quantity_extracted column is Numeric — coerce strings like "30 пачек"
+        # to a Decimal and stash the trailing word as unit when unit is missing.
+        import re as _re
+        from decimal import Decimal as _Dec
+        raw_qty = ai_result.get("quantity")
+        norm_qty: _Dec | None = None
+        norm_unit: str | None = ai_result.get("unit") or None
+        if raw_qty is not None:
+            qty_str = str(raw_qty).strip()
+            m = _re.search(r"[-+]?\d+(?:[.,]\d+)?", qty_str)
+            if m:
+                try:
+                    norm_qty = _Dec(m.group(0).replace(",", "."))
+                except Exception:
+                    norm_qty = None
+                if not norm_unit:
+                    tail = qty_str[m.end():].strip()
+                    if tail:
+                        norm_unit = tail.split()[0][:50]
+
         # Ensure characteristics is never None before saving.
         # Use the actual spec_text for regex scan (richer than ai_summary_ru).
         _scan_text = spec_text or ai_result.get("ai_summary_ru") or ai_result.get("product_name") or ""
@@ -287,8 +307,8 @@ async def _save_lot_analysis(
             dimensions=ai_result.get("dimensions"),
             technical_params=ai_result.get("technical_params", {}),
             materials=ai_result.get("materials"),
-            quantity_extracted=ai_result.get("quantity"),
-            unit_extracted=ai_result.get("unit"),
+            quantity_extracted=norm_qty,
+            unit_extracted=norm_unit,
             analogs_allowed=ai_result.get("analogs_allowed"),
             spec_clarity=ai_result.get("spec_clarity", "vague"),
             key_requirements=ai_result.get("key_requirements", []),

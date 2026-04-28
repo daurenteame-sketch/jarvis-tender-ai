@@ -396,6 +396,17 @@ function ProductCard({ resolved, analysis, characteristics: charsProp, specText,
         </div>
       )}
 
+      {/* ── Техническая спецификация (текст ТЗ из ПДФ/HTML) ───────────── */}
+      {(() => {
+        const text = (specText || rawSpecText || '').trim();
+        if (!text) return null;
+        return (
+          <div className="mb-3">
+            <SpecTextBlock text={text} />
+          </div>
+        );
+      })()}
+
       {/* ── Точная модель / что искать ─────────────────────────────────── */}
       <div className="rounded-lg border border-blue-500/25 bg-blue-500/10 px-3 py-3 mb-3">
         <div className="flex items-center gap-1.5 mb-2">
@@ -614,23 +625,14 @@ function ProductCard({ resolved, analysis, characteristics: charsProp, specText,
           </div>
         </div>
       )}
-      {/* ── Техническое задание: таблица + PDF ──────────────────────── */}
+      {/* ── PDF-просмотр (текст спецификации уже показан выше) ────────── */}
       {(() => {
-        const text = (specText || rawSpecText || '').trim();
         const apiBase = process.env.NEXT_PUBLIC_API_URL || 'http://localhost:8000';
         const pdfProxyUrl = lotId ? `${apiBase}/api/v1/lots/${lotId}/techspec-pdf` : null;
+        if (!pdfProxyUrl) return null;
         return (
-          <div className="mb-3 space-y-2">
-            {text ? (
-              <SpecTextBlock text={text} />
-            ) : (
-              <div className="rounded-lg border border-gray-800 bg-gray-900/40 px-3 py-2 text-xs text-gray-500">
-                Текст спецификации не извлечён — нажмите «Полный анализ».
-              </div>
-            )}
-            {pdfProxyUrl && (
-              <PdfViewer proxyUrl={pdfProxyUrl} />
-            )}
+          <div className="mb-3">
+            <PdfViewer proxyUrl={pdfProxyUrl} />
           </div>
         );
       })()}
