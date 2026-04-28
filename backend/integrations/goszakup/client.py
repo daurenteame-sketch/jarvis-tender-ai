@@ -12,6 +12,7 @@ Rate limits: ~10 req/sec, max 100 items per query page
 from __future__ import annotations
 
 import asyncio
+import re
 from typing import AsyncIterator, Optional
 import httpx
 import structlog
@@ -22,6 +23,13 @@ from integrations.goszakup.queries import QUERY_ANNOUNCES, STATUS_PUBLISHED
 logger = structlog.get_logger(__name__)
 
 SPEC_EXTENSIONS = {".pdf", ".doc", ".docx", ".xls", ".xlsx", ".txt"}
+
+# Bank-guarantee / boilerplate templates served alongside lots; never the techspec.
+_GUARANTEE_DOC_RE = re.compile(r"обеспечени|гарант|банков|template|guarantee", re.IGNORECASE)
+
+
+def _looks_like_guarantee(name: str, url: str) -> bool:
+    return bool(_GUARANTEE_DOC_RE.search(f"{name} {url}"))
 
 
 class GosZakupClient:
@@ -225,11 +233,12 @@ class GosZakupClient:
             if not ext_raw and name and "." in name:
                 ext_raw = name.rsplit(".", 1)[-1]
             ext = ("." + ext_raw.lower().lstrip(".")) if ext_raw else ""
+            is_spec = ext in SPEC_EXTENSIONS and not _looks_like_guarantee(name, url)
             docs.append({
                 "url": url,
                 "name": name,
                 "extension": ext,
-                "is_spec": ext in SPEC_EXTENSIONS,
+                "is_spec": is_spec,
             })
         return docs
 

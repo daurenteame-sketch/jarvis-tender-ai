@@ -14,6 +14,7 @@ Known REST endpoints:
 from __future__ import annotations
 
 import asyncio
+import re
 from typing import AsyncIterator, Optional
 import httpx
 import structlog
@@ -24,6 +25,12 @@ logger = structlog.get_logger(__name__)
 
 ZAKUPSK_BASE = "https://zakup.sk.kz"
 SPEC_EXTENSIONS = {".pdf", ".doc", ".docx", ".xls", ".xlsx"}
+
+_GUARANTEE_DOC_RE = re.compile(r"обеспечени|гарант|банков|template|guarantee", re.IGNORECASE)
+
+
+def _looks_like_guarantee(name: str, url: str) -> bool:
+    return bool(_GUARANTEE_DOC_RE.search(f"{name} {url}"))
 
 # Status IDs on zakup.sk.kz
 STATUS_PUBLISHED = 1
@@ -253,11 +260,12 @@ class ZakupSKClient:
                 continue
             name = f.get("name") or f.get("nameRu") or url.split("/")[-1]
             ext = ("." + url.rsplit(".", 1)[-1].lower()) if "." in url else ""
+            is_spec = ext in SPEC_EXTENSIONS and not _looks_like_guarantee(name, url)
             docs.append({
                 "url": url,
                 "name": name,
                 "extension": ext,
-                "is_spec": ext in SPEC_EXTENSIONS,
+                "is_spec": is_spec,
             })
         return docs
 
