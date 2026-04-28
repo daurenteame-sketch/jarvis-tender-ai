@@ -49,29 +49,72 @@ def extract_text_from_pdf(content: bytes) -> str:
 
 
 def _pdf_pdfplumber(content: bytes) -> str:
-    """Extract text from PDF using pdfplumber (text-layer only)."""
+    """
+    Extract text from PDF using pdfplumber.
+    Tries table extraction first (goszakup techspec PDFs are table-based).
+    Falls back to raw text extraction.
+    """
     try:
         import pdfplumber
-        text_parts: list[str] = []
+        table_rows: list[tuple[str, str]] = []
+        raw_parts: list[str] = []
+
         with pdfplumber.open(io.BytesIO(content)) as pdf:
             for i, page in enumerate(pdf.pages):
-                text = page.extract_text()
-                if text:
-                    text_parts.append(text)
-                    print(
-                        f"[document_parser] PDF page {i+1}: {len(text)} chars",
-                        flush=True,
-                    )
-        result = "\n".join(text_parts)
+                # Try table extraction
+                tables = page.extract_tables()
+                for table in (tables or []):
+                    for row in table:
+                        if not row or len(row) < 2:
+                            continue
+                        # Clean cells
+                        cells = [_clean_cell(c) for c in row]
+                        # 2-column key-value table
+                        if len(cells) == 2 and cells[0] and cells[1]:
+                            table_rows.append((cells[0], cells[1]))
+                        # Multi-column: join non-empty cells
+                        elif any(cells):
+                            joined = " | ".join(c for c in cells if c)
+                            if joined.strip():
+                                raw_parts.append(joined)
+
+                # Also get plain text for non-table content
+                raw = page.extract_text() or ""
+                if raw.strip():
+                    raw_parts.append(raw.strip())
+
+        # If we found key-value table rows — format as clean spec
+        if table_rows:
+            # Drop Kazakh-language rows (keys contain Kazakh-specific characters)
+            _KZ_CHARS = set("әғқңөұүіӘҒҚҢӨҰҮІ")
+            ru_rows = [(k, v) for k, v in table_rows if not any(c in _KZ_CHARS for c in k)]
+            # Fallback: keep all rows if no Russian rows found
+            rows_to_use = ru_rows if ru_rows else table_rows
+            lines = [f"{k.rstrip(': ').strip()}: {v}" for k, v in rows_to_use if k and v]
+            result = "\n".join(lines)
+            print(
+                f"[document_parser] pdfplumber tables: {len(table_rows)} rows → {len(result)} chars",
+                flush=True,
+            )
+            return result
+
+        # Fallback: raw text
+        result = "\n".join(raw_parts)
         print(
-            f"[document_parser] pdfplumber total: {len(result)} chars "
-            f"from {len(text_parts)} pages",
+            f"[document_parser] pdfplumber text: {len(result)} chars",
             flush=True,
         )
         return result
     except Exception as e:
         logger.error("pdfplumber extraction failed", error=str(e))
         return ""
+
+
+def _clean_cell(value) -> str:
+    """Normalize a table cell value."""
+    if value is None:
+        return ""
+    return " ".join(str(value).split()).strip()
 
 
 def _pdf_ocr(content: bytes) -> str:

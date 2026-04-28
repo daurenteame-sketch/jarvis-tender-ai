@@ -60,6 +60,98 @@ _TITLE_PREFIXES = re.compile(
 
 # ── public API ─────────────────────────────────────────────────────────────────
 
+def _parse_spec_table(spec: str) -> dict[str, str]:
+    """
+    Parse structured spec text (key: value lines) into a dict.
+    Handles the goszakup table format produced by pdfplumber extraction.
+    """
+    result: dict[str, str] = {}
+    for line in spec.splitlines():
+        idx = line.find(':')
+        if 0 < idx < 200:
+            k = line[:idx].strip().lower()
+            v = line[idx + 1:].replace(':', '', 1).strip()
+            if k and v:
+                result[k] = v
+    return result
+
+
+# Fields that carry product identity from goszakup spec table
+_SPEC_NAME_KEYS  = ('наименование лота', 'наименование закупки')
+_SPEC_DESC_KEYS  = ('описание лота', 'дополнительное описание лота')
+_SPEC_TECH_KEYS  = ('описание и требуемые', 'функциональные', 'характеристики')
+
+# Material/attribute words worth keeping in the search query
+_MATERIAL_WORDS = re.compile(
+    r'\b(хром|нержавеющ|латун|сталь|пластик|резин|алюмин|медн|чугун|'
+    r'белый|черный|матов|глянц|led|rgb|встраив|накладн|однорук|двухрук|'
+    r'термостат|смесит|душ|кран|вентил|насос|помп|мотор|датчик|контрол)\w*\b',
+    re.IGNORECASE,
+)
+
+
+def _build_query_from_table(table: dict[str, str], title: str) -> str:
+    """
+    Build a precise search query from parsed spec table fields.
+    E.g. "Смеситель для душа хром латунь" instead of "Смеситель"
+    """
+    name = ""
+    for k in _SPEC_NAME_KEYS:
+        for key in table:
+            if k in key:
+                name = table[key]
+                break
+        if name:
+            break
+
+    desc_parts: list[str] = []
+    for k in _SPEC_DESC_KEYS:
+        for key in table:
+            if k in key and table[key] and table[key] != name:
+                desc_parts.append(table[key])
+                break
+
+    tech = ""
+    for k in _SPEC_TECH_KEYS:
+        for key in table:
+            if k in key:
+                tech = table[key]
+                break
+        if tech:
+            break
+
+    # Combine name + description into base query
+    combined = " ".join(filter(None, [name or title, *desc_parts, tech]))
+
+    # Extract material/attribute keywords from combined text
+    materials = list(dict.fromkeys(
+        m.group(0).lower() for m in _MATERIAL_WORDS.finditer(combined)
+    ))
+
+    base = name or title
+    enriched = base
+    if desc_parts:
+        short_desc = desc_parts[0].split(',')[0].strip()
+        enriched = f"{base} {short_desc}"
+
+    # Add materials/attributes not already present in enriched
+    enriched_lower = enriched.lower()
+    extra = [m for m in materials if m not in enriched_lower][:2]
+    if extra:
+        enriched = enriched + " " + " ".join(extra)
+
+    # Deduplicate words while preserving order
+    seen: set[str] = set()
+    words = []
+    for w in enriched.split():
+        wl = w.lower()
+        if wl not in seen:
+            seen.add(wl)
+            words.append(w)
+
+    return _shorten(" ".join(words), 100)
+
+
 def resolve_product(
     spec_text:          str  = "",
     title:              str  = "",
@@ -88,6 +180,9 @@ def resolve_product(
     """
     spec = (spec_text or "").strip()
     params = dict(ai_technical_params or {})
+
+    # ── Stage 0: parse structured spec table (goszakup key:value format) ────────
+    spec_table = _parse_spec_table(spec) if spec else {}
 
     # ── Stage 1: extract standard and model from spec text ──────────────────────
     standard = _extract_standard(spec)
@@ -137,16 +232,27 @@ def resolve_product(
         source = "title"
 
     # ── Stage 3: build parameters dict ──────────────────────────────────────────
-    if not params and spec:
-        params = _extract_inline_params(spec)
+    if not params:
+        if spec_table:
+            # Use parsed table directly — already key:value structured
+            _SKIP = {'номер закупки', 'наименование закупки', 'номер лота',
+                     'места поставки', 'срок поставки', 'единица измерения', 'количество'}
+            params = {k: v for k, v in spec_table.items()
+                      if k not in _SKIP and len(v) < 200}
+        elif spec:
+            params = _extract_inline_params(spec)
 
     # ── Stage 4: build search_query ─────────────────────────────────────────────
-    parts = [product_name]
-    if model and model != product_name:
-        parts.append(model)
-    if standard:
-        parts.append(standard)
-    search_query = _shorten(" ".join(dict.fromkeys(parts)), 120)   # dedup + truncate
+    if spec_table and source in ("ai_name", "title"):
+        # Structured spec available — build enriched query from table
+        search_query = _build_query_from_table(spec_table, product_name)
+    else:
+        parts = [product_name]
+        if model and model != product_name:
+            parts.append(model)
+        if standard:
+            parts.append(standard)
+        search_query = _shorten(" ".join(dict.fromkeys(parts)), 120)
 
     brand_out = ai_brand.strip() or None
 

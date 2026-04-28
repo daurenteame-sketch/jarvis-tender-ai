@@ -40,6 +40,7 @@ class TenderLot(Base):
     description = Column(Text)
     technical_spec_text = Column(Text)                    # AI-ready spec text (≤10 000 chars)
     raw_spec_text = Column(Text)                          # full untruncated extracted text (debug)
+    techspec_pdf_url = Column(Text)                       # direct URL to the techspec PDF on goszakup
 
     # Product/service details
     quantity = Column(Numeric(18, 4))

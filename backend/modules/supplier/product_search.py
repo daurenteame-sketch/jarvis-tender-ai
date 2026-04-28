@@ -2,17 +2,16 @@
 Product Search Service — finds REAL product page URLs across KZ/RU/CN marketplaces.
 
 Strategy:
-  1. Wildberries (RU) — undocumented public API → returns real product page URLs
-  2. Kaspi.kz (KZ)   — search URL (closest to product with spec query)
-  3. Ozon (RU)       — search URL with spec query
-  4. Alibaba (CN)    — search URL with English query
-  5. 1688.com (CN)   — search URL (Chinese/pinyin)
-  6. AliExpress (CN) — search URL with English query
+  1. Wildberries (RU) — public JSON API → direct product pages + prices in RUB
+  2. Kaspi.kz (KZ)   — DuckDuckGo site:kaspi.kz search → direct product pages
+  3. Satu.kz (KZ)    — DuckDuckGo site:satu.kz search → direct product pages
+  4. Ozon (RU)       — search URL with spec query
+  5. Alibaba (CN)    — search URL with English query
+  6. 1688.com (CN)   — search URL (only when query is Latin/English)
+  7. AliExpress (CN) — search URL with English query
 
-Wildberries is the ONLY platform where we can get real product IDs
-(and thus real product page URLs) without authentication.
-For all others we generate optimized search URLs that open a search results page
-as close as possible to the target product.
+WB and DDG-found pages are type="product" (direct product page, no price for DDG).
+Others are type="search" (search results page).
 """
 from __future__ import annotations
 
@@ -26,19 +25,14 @@ import structlog
 
 logger = structlog.get_logger(__name__)
 
-# Timeout for external requests
 _HTTP_TIMEOUT = 8.0
 
-# WB search API variants (try in order until one returns results)
 _WB_SEARCH_URLS = [
-    # v5 with spp cookie
     "https://search.wb.ru/exactmatch/ru/common/v5/search?query={query}&resultset=catalog&sort=popular&page=1&limit={limit}",
-    # v4 fallback
     "https://search.wb.ru/exactmatch/ru/common/v4/search?query={query}&resultset=catalog&sort=popular&page=1&limit={limit}",
 ]
 _WB_PRODUCT_URL = "https://www.wildberries.ru/catalog/{id}/detail.aspx"
 
-# Generic words to strip from search queries (reduce noise)
 _NOISE_RU = frozenset({
     "поставка", "поставки", "закупка", "приобретение", "товар", "изделие",
     "продукция", "продукт", "материал", "оборудование", "оснащение",
@@ -51,15 +45,19 @@ _NOISE_EN = frozenset({
     "delivery", "procurement",
 })
 
+_COMMON_HEADERS = {
+    "User-Agent": (
+        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+        "AppleWebKit/537.36 (KHTML, like Gecko) "
+        "Chrome/124.0.0.0 Safari/537.36"
+    ),
+    "Accept": "application/json, text/plain, */*",
+    "Accept-Language": "ru-RU,ru;q=0.9,kk;q=0.8,en;q=0.7",
+}
+
 
 def _clean_query(name: str, max_words: int = 6) -> str:
-    """
-    Strip noise words and limit query length for better marketplace search results.
-    Preserves numbers, brands, and model identifiers.
-    """
-    # Remove parenthetical specs like "(220В, 50Гц)" — keep numbers + units
-    name = re.sub(r"\s*\([^)]{30,}\)", "", name)  # only remove long parens
-    # Normalize whitespace
+    name = re.sub(r"\s*\([^)]{30,}\)", "", name)
     tokens = name.split()
     cleaned = []
     for tok in tokens:
@@ -67,64 +65,38 @@ def _clean_query(name: str, max_words: int = 6) -> str:
         if tl in _NOISE_RU or tl in _NOISE_EN:
             continue
         cleaned.append(tok)
-    # Limit to max_words most meaningful tokens (prefer the first ones which carry the noun)
     result = " ".join(cleaned[:max_words])
     return result.strip() or name[:60]
 
 
 def _extract_spec_query(product_name: str, characteristics: dict) -> str:
-    """
-    Build an enriched query from product name + key spec values.
-    E.g. "Ноутбук Dell i7 16GB 512GB" instead of just "Ноутбук"
-    """
     base = _clean_query(product_name)
     spec_tokens: list[str] = []
-
-    # Extract key spec values (short values only — numbers, brands, models)
     for key, val in (characteristics or {}).items():
         val_str = str(val).strip()
-        # Skip overly long values, "Yes/No" style values, and duplicates
         if not val_str or len(val_str) > 30:
             continue
         if val_str.lower() in ("да", "нет", "yes", "no", "true", "false", "-", "—"):
             continue
-        # Include values that look like numbers/units/brands (short)
         if len(val_str) <= 20:
             spec_tokens.append(val_str)
         if len(spec_tokens) >= 3:
             break
-
     if spec_tokens:
-        enriched = base + " " + " ".join(spec_tokens)
-        return enriched[:100]
+        return (base + " " + " ".join(spec_tokens))[:100]
     return base
 
 
-# ── Wildberries product search (real product page URLs) ──────────────────────
+# ── Wildberries ───────────────────────────────────────────────────────────────
 
-async def search_wildberries(query: str, limit: int = 4) -> list[dict]:
-    """
-    Search Wildberries and return real product page URLs.
-
-    Returns list of:
-      {"url": "https://wildberries.ru/catalog/{id}/detail.aspx",
-       "name": "...", "price_rub": 1234, "brand": "...", "type": "product"}
-
-    Falls back to empty list if WB API is unavailable or returns no results
-    (geo-blocked IPs, etc.) — the caller adds a search URL fallback instead.
-    """
+async def search_wildberries(query: str, limit: int = 3) -> list[dict]:
+    """Search WB public API — returns real product pages sorted by popularity."""
     if not query:
         return []
 
     q_encoded = urllib.parse.quote_plus(query)
     headers = {
-        "User-Agent": (
-            "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
-            "AppleWebKit/537.36 (KHTML, like Gecko) "
-            "Chrome/124.0.0.0 Safari/537.36"
-        ),
-        "Accept": "application/json, text/plain, */*",
-        "Accept-Language": "ru-RU,ru;q=0.9,en;q=0.8",
+        **_COMMON_HEADERS,
         "Origin": "https://www.wildberries.ru",
         "Referer": "https://www.wildberries.ru/",
     }
@@ -137,17 +109,15 @@ async def search_wildberries(query: str, limit: int = 4) -> list[dict]:
                 resp = await client.get(url, headers=headers)
                 resp.raise_for_status()
                 data = resp.json()
-                # v5: top-level "products", v4: data.products
                 products = (
                     data.get("products")
                     or (data.get("data") or {}).get("products")
                     or []
                 )
                 if products:
-                    break   # got results — stop trying
+                    break
         except Exception as exc:
-            logger.warning("WB search endpoint failed", url=url[:80], error=str(exc)[:80])
-            continue
+            logger.warning("WB search failed", url=url[:80], error=str(exc)[:80])
 
     results = []
     for p in products[:limit]:
@@ -160,21 +130,55 @@ async def search_wildberries(query: str, limit: int = 4) -> list[dict]:
             "name":      p.get("name", "")[:80],
             "brand":     p.get("brand", ""),
             "price_rub": int(price_rub),
+            "price_kzt": None,
             "type":      "product",
             "platform":  "Wildberries",
             "country":   "RU",
         })
 
+    # Sort cheapest first
+    results.sort(key=lambda x: x["price_rub"])
     logger.info("WB search", query=query[:50], found=len(results))
     return results
 
 
-# ── Search URL builders per platform ─────────────────────────────────────────
+# ── Playwright scrapers — cache-first, background-on-miss ────────────────────
+
+async def _pw_scrape_kaspi(query: str, limit: int) -> list[dict]:
+    """
+    Returns cached Kaspi products instantly.
+    On cache miss: fires background Playwright scrape (writes to cache),
+    returns [] so the caller falls back to search URL immediately.
+    """
+    from modules.supplier.playwright_scraper import scrape_kaspi, _cache_key, _cache_get
+    cached = await _cache_get(_cache_key("kaspi", query))
+    if cached is not None:
+        return cached
+    # No cache — start background scrape, return empty now
+    asyncio.ensure_future(scrape_kaspi(query, limit))
+    return []
+
+
+async def _pw_scrape_satu(query: str, limit: int) -> list[dict]:
+    """
+    Returns cached Satu products instantly.
+    On cache miss: fires background Playwright scrape, returns [] immediately.
+    """
+    from modules.supplier.playwright_scraper import scrape_satu, _cache_key, _cache_get
+    cached = await _cache_get(_cache_key("satu", query))
+    if cached is not None:
+        return cached
+    asyncio.ensure_future(scrape_satu(query, limit))
+    return []
+
+
+# ── Search URL builders ───────────────────────────────────────────────────────
 
 def _kaspi_url(query_ru: str) -> dict:
     q = urllib.parse.quote_plus(_clean_query(query_ru, max_words=5))
+    # sort=1 = price ascending on Kaspi
     return {
-        "url":      f"https://kaspi.kz/shop/search/?text={q}&c=750000000",
+        "url":      f"https://kaspi.kz/shop/search/?text={q}&c=750000000&sort=1",
         "platform": "Kaspi.kz",
         "country":  "KZ",
         "type":     "search",
@@ -192,7 +196,6 @@ def _ozon_url(query_ru: str) -> dict:
 
 
 def _wildberries_search_url(query_ru: str) -> dict:
-    """Fallback: WB search page URL (when API fails)."""
     q = urllib.parse.quote_plus(_clean_query(query_ru, max_words=6))
     return {
         "url":      f"https://www.wildberries.ru/catalog/0/search.aspx?search={q}",
@@ -212,9 +215,16 @@ def _alibaba_url(query_en: str) -> dict:
     }
 
 
-def _1688_url(query: str) -> dict:
-    """1688 accepts both Russian cyrillic and English in the query."""
-    q = urllib.parse.quote_plus(_clean_query(query, max_words=5))
+def _has_cyrillic(text: str) -> bool:
+    return bool(re.search(r'[А-ЯЁа-яё]', text))
+
+
+def _1688_url(query: str) -> Optional[dict]:
+    """Returns None when query is Cyrillic — 1688.com only works with Latin/Chinese."""
+    cleaned = _clean_query(query, max_words=5)
+    if _has_cyrillic(cleaned):
+        return None  # skip — will show empty results on 1688
+    q = urllib.parse.quote_plus(cleaned)
     return {
         "url":      f"https://s.1688.com/selloffer/offer_search.htm?keywords={q}",
         "platform": "1688.com",
@@ -252,61 +262,54 @@ async def get_product_links(
     max_links: int = 8,
 ) -> list[dict]:
     """
-    Return 3-8 marketplace links for a product.
+    Return marketplace links for a product — real product pages where available.
 
     Each entry:
       {
-        "platform": "Wildberries",
-        "country": "RU",
-        "url": "https://...",
-        "type": "product" | "search",   # product = real product page
-        "name": "...",                   # only for type=product
-        "price_rub": 1234,               # only for type=product (WB)
-        "brand": "...",                  # only for type=product
+        "platform": "Kaspi.kz",
+        "country":  "KZ",
+        "url":      "https://...",
+        "type":     "product" | "search",
+        "name":     "...",        # product title (type=product only)
+        "price_kzt": 12500,       # KZT price (Kaspi/Satu)
+        "price_rub": 3490,        # RUB price (WB)
+        "brand":    "...",
       }
-
-    "product" type links open actual product pages with photos.
-    "search" type links open a search results page pre-filtered for the product.
     """
     characteristics = characteristics or {}
     spec_query = _extract_spec_query(product_name, characteristics)
     query_en = product_name_en or product_name
 
-    # Static search links — always included regardless of WB API result
-    static_links = [
-        _kaspi_url(spec_query),
-        _satu_url(spec_query),
+    # Run all real-product searches in parallel
+    # Playwright scrapers use Redis cache (6h TTL) so repeat calls are instant
+    gathered = await asyncio.gather(
+        asyncio.wait_for(search_wildberries(spec_query, limit=2),    timeout=8.0),
+        asyncio.wait_for(_pw_scrape_kaspi(spec_query, limit=2),      timeout=20.0),
+        asyncio.wait_for(_pw_scrape_satu(spec_query, limit=2),       timeout=20.0),
+        return_exceptions=True,
+    )
+    wb_products    = gathered[0] if not isinstance(gathered[0], Exception) else []
+    kaspi_products = gathered[1] if not isinstance(gathered[1], Exception) else []
+    satu_products  = gathered[2] if not isinstance(gathered[2], Exception) else []
+
+    # Fallback search URLs for platforms where scraping found nothing
+    _link_1688 = _1688_url(query_en)  # None when query is Cyrillic
+    fallback_links: list[dict] = [x for x in [
+        _kaspi_url(spec_query)              if not kaspi_products else None,
+        _satu_url(spec_query)               if not satu_products  else None,
+        _wildberries_search_url(spec_query) if not wb_products    else None,
         _ozon_url(spec_query),
         _alibaba_url(query_en),
-        _1688_url(query_en),
+        _link_1688,
         _aliexpress_url(query_en),
-    ]
+    ] if x is not None]
 
-    # Try to get real WB product pages via API (with timeout)
-    wb_products: list[dict] = []
-    try:
-        wb_products = await asyncio.wait_for(
-            search_wildberries(spec_query, limit=3),
-            timeout=6.0,
-        )
-    except (asyncio.TimeoutError, Exception) as exc:
-        logger.warning("WB product search timed out or failed", error=str(exc)[:80])
-
-    # If WB API returned no real products, add a WB search URL fallback
-    if not wb_products:
-        static_links.insert(2, _wildberries_search_url(spec_query))
-
-    # Combine: real product pages first (WB), then search pages
-    combined = []
-    for p in wb_products:
-        combined.append(p)
-    for s in static_links:
-        combined.append(s)
-
+    # KZ real pages first (Kaspi, Satu), then WB, then search fallbacks
+    combined: list[dict] = kaspi_products + satu_products + list(wb_products) + fallback_links
     return combined[:max_links]
 
 
-# ── Sync wrapper for use in non-async context ─────────────────────────────────
+# ── Sync wrapper ──────────────────────────────────────────────────────────────
 
 def get_product_links_sync(
     product_name: str,
@@ -314,11 +317,9 @@ def get_product_links_sync(
     product_name_en: str = "",
     max_links: int = 8,
 ) -> list[dict]:
-    """Synchronous wrapper around get_product_links."""
     try:
         loop = asyncio.get_event_loop()
         if loop.is_running():
-            # Already in async context — should use await get_product_links() directly
             import concurrent.futures
             with concurrent.futures.ThreadPoolExecutor(max_workers=1) as pool:
                 future = pool.submit(

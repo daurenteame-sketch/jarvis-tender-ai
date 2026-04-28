@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import io
 import math
+import re
 import uuid
 from datetime import datetime, timezone
 from typing import Optional
@@ -32,6 +33,7 @@ from models.supplier import SupplierMatch, Supplier
 from models.user_action import UserAction
 from modules.product_resolver import resolve_product
 from modules.supplier.product_search import get_product_links
+from modules.supplier.product_validator import validate_products
 
 router = APIRouter(prefix="/lots", tags=["lots"])
 
@@ -583,6 +585,27 @@ async def get_lot(
 
     lot, tender = result
 
+    # Auto-extract spec text on first open if not yet populated (no full analysis needed)
+    if not (lot.technical_spec_text or "").strip():
+        try:
+            import asyncio as _aio
+            tech_text, raw_text, pdf_url = await _aio.wait_for(
+                _refresh_spec_text(lot, tender, force=False),
+                timeout=20.0,
+            )
+            updated = False
+            if tech_text and len(tech_text.strip()) > 50:
+                lot.technical_spec_text = tech_text
+                lot.raw_spec_text = raw_text
+                updated = True
+            if pdf_url and not lot.techspec_pdf_url:
+                lot.techspec_pdf_url = pdf_url
+                updated = True
+            if updated:
+                await db.commit()
+        except Exception as _exc:
+            print(f"[auto spec] failed for lot {lot_id}: {_exc}", flush=True)
+
     # AI analysis
     analysis_row = await db.execute(
         select(TenderLotAnalysis).where(TenderLotAnalysis.lot_id == lot_id)
@@ -689,9 +712,8 @@ async def get_lot(
     )
 
     # ── Marketplace links (real product search URLs across KZ/RU/CN) ─────────
-    # Generated on-the-fly using the product name from analysis or lot title.
-    # Does NOT block — uses asyncio.wait_for with short timeout.
-    _product_name_for_links = (
+    # Use enriched search_query from product resolver (includes materials, description).
+    _product_name_for_links = resolved["search_query"] or (
         (analysis.product_name if analysis and analysis.product_name else None)
         or lot.title
         or ""
@@ -713,6 +735,23 @@ async def get_lot(
         )
     except Exception:
         pass
+
+    # GPT-validate real product pages against the spec (cache-first, fast)
+    if marketplace_links:
+        try:
+            import asyncio as _asyncio
+            _spec_text = (lot.technical_spec_text or lot.description or "")[:600]
+            marketplace_links = await _asyncio.wait_for(
+                validate_products(
+                    product_name=_product_name_for_links,
+                    characteristics=_tech_params_for_links,
+                    products=marketplace_links,
+                    spec_text=_spec_text,
+                ),
+                timeout=18.0,
+            )
+        except Exception:
+            pass
 
     # Attach marketplace_links to each supplier row so the frontend has it
     for sup in suppliers:
@@ -774,6 +813,7 @@ async def get_lot(
         "description": lot.description,
         "technical_spec_text": lot.technical_spec_text,
         "raw_spec_text": lot.raw_spec_text,
+        "techspec_pdf_url": getattr(lot, "techspec_pdf_url", None),
         # Top-level shortcut — frontend reads this directly (no nesting needed)
         "characteristics": _chars_from_db,
         # Purchase recommendation + identification quality
@@ -1020,6 +1060,300 @@ async def reanalyze_lot(
     }
 
 
+# ── Spec text refresh helper ──────────────────────────────────────────────────
+
+def _is_guarantee_doc(doc: dict) -> bool:
+    val = " ".join([
+        doc.get("name") or "",
+        doc.get("url") or "",
+        doc.get("row_label") or "",
+    ]).lower()
+    return bool(re.search(r"обеспечени|гарант|банков|template|guarantee", val))
+
+
+async def _fetch_goszakup_docs(
+    external_id: str,
+    client: httpx.AsyncClient,
+    lot_external_id: Optional[str] = None,
+) -> list[dict]:
+    """
+    Fetch document list from goszakup.
+    Strategy:
+    1. Parse the announce HTML page for direct file links.
+    2. Find all actionModalShowFiles(announce_id, group) JS buttons and call
+       the AJAX endpoint for each (group 125 = Техническая спецификация).
+    3. From AJAX results, prefer files matching lot_external_id in the filename.
+    """
+    from bs4 import BeautifulSoup
+
+    SPEC_EXTS = {".pdf", ".doc", ".docx", ".xls", ".xlsx"}
+    BASE = "https://goszakup.gov.kz"
+    docs: list[dict] = []
+    seen: set[str] = set()
+
+    def _parse_links(html: str, row_label: str = "") -> None:
+        soup = BeautifulSoup(html, "html.parser")
+        for a in soup.find_all("a", href=True):
+            href = a["href"].strip()
+            if not href or href.startswith("#"):
+                continue
+            full_url = (BASE + href) if href.startswith("/") else href if href.startswith("http") else None
+            if not full_url:
+                continue
+            path_lower = href.lower().split("?")[0]
+            is_download = "download_file" in path_lower or "/files/" in path_lower
+            title_attr = (a.get("title") or "").strip()
+            anchor_text = a.get_text(separator=" ", strip=True)
+            name = ""
+            ext = ""
+            for candidate in (title_attr, anchor_text, path_lower.split("/")[-1]):
+                for e in SPEC_EXTS:
+                    if candidate.lower().endswith(e):
+                        name = candidate
+                        ext = e
+                        break
+                if ext:
+                    break
+            if not ext and is_download:
+                name = title_attr or anchor_text or path_lower.split("/")[-1]
+                ext = ".pdf"
+            if not ext:
+                continue
+            if full_url in seen:
+                continue
+            seen.add(full_url)
+            label = row_label
+            if not label:
+                td = a.find_parent("td")
+                if td:
+                    tr = td.find_parent("tr")
+                    if tr:
+                        first_td = tr.find("td")
+                        if first_td and first_td != td:
+                            label = first_td.get_text(strip=True).lower()
+            docs.append({"url": full_url, "name": name or full_url.split("/")[-1], "extension": ext, "is_spec": True, "row_label": label})
+
+    # Step 1: parse the announce HTML page for direct links
+    page_url = f"https://goszakup.gov.kz/ru/announce/index/{external_id}?tab=documents"
+    try:
+        print(f"[refresh_spec_text] fetching {page_url}", flush=True)
+        resp = await client.get(page_url)
+        if resp.status_code == 200:
+            html = resp.text
+            _parse_links(html)
+
+            # Step 2: find actionModalShowFiles buttons and call AJAX for each
+            # Techspec is group 125; contract is 101
+            TECHSPEC_GROUPS = {125, 101}
+            buttons = re.findall(r"actionModalShowFiles\((\d+),(\d+)\)", html)
+            for ann_id_str, group_str in buttons:
+                group = int(group_str)
+                ajax_url = f"https://goszakup.gov.kz/ru/announce/actionAjaxModalShowFiles/{ann_id_str}/{group}"
+                try:
+                    ajax_resp = await client.get(
+                        ajax_url,
+                        headers={"X-Requested-With": "XMLHttpRequest", "Referer": page_url},
+                    )
+                    if ajax_resp.status_code == 200:
+                        ajax_html = ajax_resp.text
+                        # Parse the file table — each row: lot_number | file_link | author | org | date | sig
+                        ajax_soup = BeautifulSoup(ajax_html, "html.parser")
+                        for tr in ajax_soup.find_all("tr"):
+                            tds = tr.find_all("td")
+                            if len(tds) < 2:
+                                continue
+                            a_tag = tds[1].find("a", href=True)
+                            if not a_tag:
+                                continue
+                            href = a_tag["href"].strip()
+                            file_name = a_tag.get_text(strip=True)
+                            full_url = (BASE + href) if href.startswith("/") else href
+                            if full_url in seen:
+                                continue
+                            # Prefer files matching our lot's external_id
+                            if lot_external_id and lot_external_id not in file_name and lot_external_id not in href:
+                                # Still add, but at lower priority (append later)
+                                pass
+                            seen.add(full_url)
+                            docs.append({
+                                "url": full_url,
+                                "name": file_name or full_url.split("/")[-1],
+                                "extension": ".pdf",
+                                "is_spec": True,
+                                "row_label": "техническая спецификация" if group == 125 else "проект договора",
+                                "lot_match": bool(lot_external_id and (lot_external_id in file_name or lot_external_id in href)),
+                            })
+                            print(f"[refresh_spec_text] AJAX group={group} file={file_name!r} url={full_url}", flush=True)
+                except Exception as exc:
+                    print(f"[refresh_spec_text] AJAX error group={group}: {exc}", flush=True)
+    except Exception as exc:
+        print(f"[refresh_spec_text] announce fetch error: {exc}", flush=True)
+
+    # Sort: lot-matched files first, then by techspec label
+    docs.sort(key=lambda d: (0 if d.get("lot_match") else 1, 0 if "техническая" in (d.get("row_label") or "") else 1))
+
+    print(f"[refresh_spec_text] found {len(docs)} docs total", flush=True)
+    for d in docs:
+        print(f"  - {d['name']!r}  label={d.get('row_label')!r}  match={d.get('lot_match')}  url={d['url']}", flush=True)
+    return docs
+
+
+async def _refresh_spec_text(lot: TenderLot, tender: Tender, force: bool = False) -> tuple[str, str]:
+    """
+    Download spec PDFs from lot/tender documents (or re-fetch from goszakup if empty).
+    Returns (technical_spec_text, raw_spec_text).
+    Pass force=True to always re-download even if spec text already exists.
+    """
+    from modules.parser.document_parser import extract_text_from_bytes, truncate_for_ai
+
+    MAX_SPEC_CHARS = 10_000
+    MAX_RAW_CHARS  = 50_000
+    MAX_DOCS       = 3
+
+    if not force:
+        existing = (lot.technical_spec_text or "").strip()
+        if len(existing) > 200:
+            return existing, (getattr(lot, "raw_spec_text", None) or "")
+
+    raw_parts: list[str] = []
+    description = (lot.description or "").strip()
+    if description:
+        raw_parts.append(f"[ОПИСАНИЕ ЛОТА]\n{description}")
+
+    headers = {
+        "User-Agent": (
+            "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+            "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
+        ),
+        "Accept": "text/html,application/pdf,*/*",
+        "Accept-Language": "ru-RU,ru;q=0.9,en;q=0.8",
+    }
+
+    async with httpx.AsyncClient(timeout=40, follow_redirects=True, headers=headers) as client:
+        spec_docs: list[dict] = []
+
+        # When force=True (full reanalysis): always re-fetch from goszakup page to get clean list
+        if force and tender and tender.external_id and (lot.platform or "goszakup") == "goszakup":
+            fetched = await _fetch_goszakup_docs(
+                tender.external_id, client, lot_external_id=lot.lot_external_id
+            )
+            clean = [d for d in fetched if not _is_guarantee_doc(d)]
+            # Prefer the file that exactly matches this lot — download only that one
+            matched = [d for d in clean if d.get("lot_match")]
+            spec_docs = matched[:1] if matched else clean[:1]
+
+        # Fallback: use DB documents if goszakup fetch returned nothing
+        if not spec_docs:
+            all_docs: list[dict] = []
+            for src in (lot.documents, tender.documents if tender else None):
+                if src and isinstance(src, list):
+                    all_docs.extend(src)
+            spec_docs = [d for d in all_docs if d.get("url") and not _is_guarantee_doc(d)][:1]
+
+        print(
+            f"[refresh_spec_text] lot={lot.id} | spec_docs={len(spec_docs)} to download",
+            flush=True,
+        )
+
+        pdf_url: Optional[str] = None
+        for doc in spec_docs:
+            url  = doc.get("url", "")
+            name = doc.get("name", "") or url.split("/")[-1]
+            if url.startswith("/"):
+                url = "https://goszakup.gov.kz" + url
+            try:
+                print(f"[refresh_spec_text] GET {url}", flush=True)
+                resp = await client.get(url)
+                if resp.status_code != 200:
+                    print(f"[refresh_spec_text] HTTP {resp.status_code} — {url}", flush=True)
+                    continue
+                content = resp.content
+                if not content:
+                    continue
+                # Save PDF URL before text extraction
+                if name.lower().endswith(".pdf") or b"%PDF" in content[:5]:
+                    pdf_url = url
+                text = extract_text_from_bytes(content, name)
+                if text and len(text.strip()) > 50:
+                    print(f"[refresh_spec_text] ✓ {len(text)} chars from {name!r}", flush=True)
+                    raw_parts.append(text)
+                else:
+                    print(f"[refresh_spec_text] ✗ empty/short from {name!r}", flush=True)
+            except Exception as exc:
+                print(f"[refresh_spec_text] error {name!r}: {exc}", flush=True)
+
+    raw_full  = "\n\n".join(raw_parts)
+    tech_text = truncate_for_ai(raw_full, MAX_SPEC_CHARS)
+    return tech_text, raw_full[:MAX_RAW_CHARS], pdf_url
+
+
+# ── Techspec PDF proxy ───────────────────────────────────────────────────────
+
+@router.get("/{lot_id}/techspec-pdf")
+async def proxy_techspec_pdf(
+    lot_id: uuid.UUID,
+    download: bool = False,
+    db: AsyncSession = Depends(get_db),
+):
+    """Proxy the techspec PDF from goszakup so the browser can embed it."""
+    lot = await db.get(TenderLot, lot_id)
+    if not lot:
+        raise HTTPException(status_code=404, detail="Lot not found")
+    pdf_url = getattr(lot, "techspec_pdf_url", None)
+
+    # If URL not cached in DB — scan lot/tender documents for a PDF
+    if not pdf_url:
+        tender = await db.get(Tender, lot.tender_id) if lot.tender_id else None
+        all_docs: list[dict] = []
+        for src in (lot.documents, tender.documents if tender else None):
+            if src and isinstance(src, list):
+                all_docs.extend(src)
+        for doc in all_docs:
+            doc_url = doc.get("url", "")
+            doc_name = (doc.get("name", "") or doc_url).lower()
+            if doc_url and (doc_name.endswith(".pdf") or "pdf" in doc_url.lower()):
+                if not _is_guarantee_doc(doc):
+                    pdf_url = doc_url
+                    # Cache it so next request is instant
+                    lot.techspec_pdf_url = pdf_url
+                    await db.commit()
+                    break
+
+    if not pdf_url:
+        raise HTTPException(status_code=404, detail="Techspec PDF not available. Run full analysis first.")
+
+    headers = {
+        "User-Agent": (
+            "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+            "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
+        ),
+        "Accept": "application/pdf,*/*",
+    }
+    try:
+        async with httpx.AsyncClient(timeout=30, follow_redirects=True, headers=headers) as client:
+            resp = await client.get(pdf_url)
+            if resp.status_code != 200:
+                raise HTTPException(status_code=502, detail=f"goszakup returned {resp.status_code}")
+            content = resp.content
+            from urllib.parse import quote as _quote
+            lot_title = (lot.title or "techspec").replace(" ", "_")[:40]
+            filename_ascii = f"techspec_{lot.lot_external_id or 'lot'}.pdf"
+            filename_utf8 = _quote(f"techspec_{lot_title}.pdf")
+            return StreamingResponse(
+                io.BytesIO(content),
+                media_type="application/pdf",
+                headers={
+                    "Content-Disposition": f"{'attachment' if download else 'inline'}; filename=\"{filename_ascii}\"; filename*=UTF-8''{filename_utf8}",
+                    "Content-Length": str(len(content)),
+                    "Cache-Control": "public, max-age=3600",
+                },
+            )
+    except HTTPException:
+        raise
+    except Exception as exc:
+        raise HTTPException(status_code=502, detail=f"Failed to fetch PDF: {exc}")
+
+
 # ── Full reanalysis (AI + profitability) ──────────────────────────────────────
 
 @router.post("/{lot_id}/reanalyze-full")
@@ -1065,6 +1399,24 @@ async def reanalyze_lot_full(
     lot.profit_margin_percent = None
     lot.confidence_level = None
     await db.commit()
+
+    # Step 0: always re-download spec text from PDF (force=True clears wrong/stale content)
+    tech_text, raw_text, pdf_url = await _refresh_spec_text(lot, tender, force=True)
+    updated = False
+    if tech_text and tech_text != (lot.technical_spec_text or ""):
+        lot.technical_spec_text = tech_text
+        lot.raw_spec_text = raw_text
+        updated = True
+    if pdf_url and pdf_url != (lot.techspec_pdf_url or ""):
+        lot.techspec_pdf_url = pdf_url
+        updated = True
+    if updated:
+        await db.commit()
+        print(
+            f"[reanalyze-full] spec text refreshed: {len(tech_text)} chars "
+            f"(was {len(lot.technical_spec_text or '')} chars)",
+            flush=True,
+        )
 
     # Step 1: AI analysis
     ctx = PipelineContext(
