@@ -2,6 +2,11 @@
 .env
 .env.local
 
+# Session-local helper files (admin tokens, ad-hoc id lists, ad-hoc SQL)
+.admin_token
+.dirty_lot_ids*.txt
+.cleanup_*.sql
+
 # Python
 __pycache__/
 *.pyc
