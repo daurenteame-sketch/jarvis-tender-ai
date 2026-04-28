@@ -8,14 +8,15 @@ set -e
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 cd "$SCRIPT_DIR/.."
 
-export PATH="/c/Program Files/Docker/Docker/resources/bin:$PATH"
+source "$SCRIPT_DIR/_lib.sh"
+locate_docker
 
 mkdir -p backups
 DATE=$(date +%Y-%m-%d_%H%M)
 OUT="backups/${DATE}.sql.gz"
 
 echo "==> Dumping postgres → $OUT"
-docker exec jarvis-tender-ai-postgres-1 sh -c 'pg_dump -U "$POSTGRES_USER" -d "$POSTGRES_DB"' \
+"$DOCKER" exec jarvis-tender-ai-postgres-1 sh -c 'pg_dump -U "$POSTGRES_USER" -d "$POSTGRES_DB"' \
   | gzip > "$OUT"
 
 SIZE=$(du -h "$OUT" | cut -f1)

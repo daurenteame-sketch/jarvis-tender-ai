@@ -8,7 +8,8 @@ set -e
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 cd "$SCRIPT_DIR/.."
 
-export PATH="/c/Program Files/Docker/Docker/resources/bin:$PATH"
+source "$SCRIPT_DIR/_lib.sh"
+locate_docker
 
 echo "==> 1/3 Checking for uncommitted work..."
 if [ -n "$(git status --porcelain)" ]; then
@@ -34,7 +35,7 @@ else
 fi
 
 echo "==> 3/3 Stopping containers (volumes preserved)..."
-docker compose stop
+dc stop
 echo "  stopped — they will auto-restart when Docker Desktop boots"
 echo
 echo "Безопасно закрывать компьютер."

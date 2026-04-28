@@ -10,8 +10,8 @@ set -e
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 cd "$SCRIPT_DIR/.."
 
-# Ensure docker is in PATH (Windows Docker Desktop puts it elsewhere by default)
-export PATH="/c/Program Files/Docker/Docker/resources/bin:$PATH"
+source "$SCRIPT_DIR/_lib.sh"
+locate_docker
 
 echo "==> 1/5 Pulling latest code from GitHub..."
 git fetch origin
@@ -25,7 +25,7 @@ else
 fi
 
 echo "==> 2/5 Building backend + frontend (only rebuilds layers that changed)..."
-docker compose up -d --build backend frontend
+dc up -d --build backend frontend
 
 echo "==> 3/5 Waiting for backend to become healthy..."
 for i in 1 2 3 4 5 6 7 8 9 10; do
