@@ -23,6 +23,43 @@ logger = structlog.get_logger(__name__)
 
 _CACHE_TTL = 60 * 60 * 6  # 6h
 
+_STOPWORDS = {
+    "и", "в", "на", "для", "с", "по", "от", "из", "к", "до", "не", "или",
+    "the", "a", "an", "of", "for", "in", "on", "with", "and", "or",
+}
+
+
+def _tokenize(text: str) -> set[str]:
+    if not text:
+        return set()
+    words = re.findall(r"[\wа-яёА-ЯЁ]+", text.lower())
+    return {w for w in words if len(w) >= 3 and w not in _STOPWORDS}
+
+
+def _heuristic_score(query_tokens: set[str], product_name: str) -> tuple[int, str]:
+    """
+    Word-overlap fallback when GPT validation isn't available.
+    Returns (score 0-100, reason).
+    """
+    if not query_tokens:
+        return 50, "Эвристика: запрос пуст, нейтральная оценка"
+    name_tokens = _tokenize(product_name)
+    if not name_tokens:
+        return 30, "Эвристика: не удалось разобрать название"
+    overlap = query_tokens & name_tokens
+    ratio = len(overlap) / max(len(query_tokens), 1)
+    if ratio >= 0.7:
+        score = 80
+    elif ratio >= 0.5:
+        score = 65
+    elif ratio >= 0.3:
+        score = 50
+    elif overlap:
+        score = 35
+    else:
+        score = 15
+    return score, f"Эвристика: совпало {len(overlap)}/{len(query_tokens)} слов"
+
 
 # ── Cache helpers ─────────────────────────────────────────────────────────────
 
@@ -167,11 +204,14 @@ async def validate_products(
         logger.info("Product validation done", product=product_name[:40], count=len(scores))
 
     except Exception as exc:
-        logger.warning("Product validation failed", error=str(exc)[:120])
-        # Return products unchanged if GPT fails
+        logger.warning("Product validation failed, using heuristic fallback", error=str(exc)[:120])
+        # GPT unavailable (quota, network, parse error) — fall back to word-overlap heuristic
+        query_tokens = _tokenize(f"{product_name} {' '.join(str(v) for v in (characteristics or {}).values())}")
         for p in real:
-            p.setdefault("relevance_score", None)
-            p.setdefault("match_reason", "")
+            score, reason = _heuristic_score(query_tokens, p.get("name", ""))
+            p["relevance_score"] = score
+            p["match_reason"] = reason
+        real.sort(key=lambda x: (-(x.get("relevance_score") or 0), x.get("price_kzt") or x.get("price_rub") or 999_999))
         return real + fallbacks
 
     # Apply scores to products
