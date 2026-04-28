@@ -196,19 +196,26 @@ function parseSpecRows(text: string): { key: string; value: string }[] | null {
 }
 
 function SpecTextBlock({ text }: { text: string }) {
-  const cleanText = _filterSpecText(text);
-  const rows = parseSpecRows(cleanText);
+  let cleanText = '';
+  let rows: { key: string; value: string }[] | null = null;
+  try {
+    cleanText = _filterSpecText(text || '');
+    rows = parseSpecRows(cleanText);
+  } catch {
+    cleanText = (text || '').trim();
+    rows = null;
+  }
 
   if (rows && rows.length >= 2) {
-    // Sort: important fields first (in declared order), then everything else.
+    const lower = (s: string) => (s || '').toLowerCase();
     const fieldOrderIndex = (key: string) => {
-      const lk = key.toLowerCase();
+      const lk = lower(key);
       for (let i = 0; i < SPEC_KEY_FIELDS.length; i++) {
         if (lk.includes(SPEC_KEY_FIELDS[i])) return i;
       }
       return 9999;
     };
-    const sortedRows = [...rows].sort((a, b) => fieldOrderIndex(a.key) - fieldOrderIndex(b.key));
+    const sortedRows = rows.slice().sort((a, b) => fieldOrderIndex(a.key) - fieldOrderIndex(b.key));
 
     return (
       <div className="rounded-lg border border-gray-700 bg-gray-900/60 overflow-hidden">
@@ -221,7 +228,7 @@ function SpecTextBlock({ text }: { text: string }) {
         </div>
         <div className="divide-y divide-gray-800">
           {sortedRows.map((r, i) => {
-            const isKey = SPEC_KEY_FIELDS.some(k => r.key.toLowerCase().includes(k));
+            const isKey = SPEC_KEY_FIELDS.some((k) => lower(r.key).includes(k));
             return (
               <div key={i} className={`flex gap-0 text-xs ${isKey ? 'bg-gray-800/60' : ''}`}>
                 <div className="w-2/5 px-3 py-2 text-gray-400 font-medium shrink-0 border-r border-gray-800 break-words">
@@ -238,10 +245,7 @@ function SpecTextBlock({ text }: { text: string }) {
     );
   }
 
-  // Fallback: plain readable text — full content, scrollable, no collapse.
-  // (User wants to read the spec right here, not click "Показать полностью".)
-  const ruText = cleanText;
-  if (!ruText) return null;
+  if (!cleanText) return null;
   return (
     <div className="rounded-lg border border-gray-700 bg-gray-900/60 overflow-hidden">
       <div className="px-3 py-2 bg-gray-800 border-b border-gray-700 flex items-center justify-between">
@@ -249,11 +253,11 @@ function SpecTextBlock({ text }: { text: string }) {
           <FileText className="w-3.5 h-3.5" />
           Техническое задание
         </span>
-        <span className="text-[10px] text-gray-500">{ruText.length.toLocaleString('ru')} симв.</span>
+        <span className="text-[10px] text-gray-500">{cleanText.length.toLocaleString('ru')} симв.</span>
       </div>
       <div className="p-3 max-h-96 overflow-y-auto">
         <pre className="text-xs text-gray-100 whitespace-pre-wrap font-sans leading-relaxed break-words">
-          {ruText}
+          {cleanText}
         </pre>
       </div>
     </div>
