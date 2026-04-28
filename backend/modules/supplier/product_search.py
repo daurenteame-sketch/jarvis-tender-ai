@@ -144,32 +144,41 @@ async def search_wildberries(query: str, limit: int = 3) -> list[dict]:
 
 # ── Playwright scrapers — cache-first, background-on-miss ────────────────────
 
+_PW_FIRST_HIT_TIMEOUT = 8.0  # how long to wait for live scrape on cache miss before falling back
+
+
 async def _pw_scrape_kaspi(query: str, limit: int) -> list[dict]:
     """
-    Returns cached Kaspi products instantly.
-    On cache miss: fires background Playwright scrape (writes to cache),
-    returns [] so the caller falls back to search URL immediately.
+    Returns cached Kaspi products when available.
+    On cache miss: kicks off Playwright scrape and waits up to 8 s for it to finish.
+    If it doesn't finish in time, returns [] but lets the task keep running so
+    its results land in Redis for the next request (within the 6 h cache TTL).
     """
     from modules.supplier.playwright_scraper import scrape_kaspi, _cache_key, _cache_get
     cached = await _cache_get(_cache_key("kaspi", query))
     if cached is not None:
         return cached
-    # No cache — start background scrape, return empty now
-    asyncio.ensure_future(scrape_kaspi(query, limit))
-    return []
+    task = asyncio.ensure_future(scrape_kaspi(query, limit))
+    try:
+        return await asyncio.wait_for(asyncio.shield(task), timeout=_PW_FIRST_HIT_TIMEOUT)
+    except asyncio.TimeoutError:
+        return []
 
 
 async def _pw_scrape_satu(query: str, limit: int) -> list[dict]:
     """
-    Returns cached Satu products instantly.
-    On cache miss: fires background Playwright scrape, returns [] immediately.
+    Returns cached Satu products when available.
+    On cache miss: same wait-with-shield strategy as Kaspi.
     """
     from modules.supplier.playwright_scraper import scrape_satu, _cache_key, _cache_get
     cached = await _cache_get(_cache_key("satu", query))
     if cached is not None:
         return cached
-    asyncio.ensure_future(scrape_satu(query, limit))
-    return []
+    task = asyncio.ensure_future(scrape_satu(query, limit))
+    try:
+        return await asyncio.wait_for(asyncio.shield(task), timeout=_PW_FIRST_HIT_TIMEOUT)
+    except asyncio.TimeoutError:
+        return []
 
 
 # ── Search URL builders ───────────────────────────────────────────────────────
