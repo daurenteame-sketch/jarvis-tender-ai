@@ -1071,6 +1071,37 @@ def _is_guarantee_doc(doc: dict) -> bool:
     return bool(re.search(r"обеспечени|гарант|банков|template|guarantee", val))
 
 
+_GUARANTEE_BODY_MARKERS = (
+    "[документ: обеспечение",
+    "банковская гарантия",
+    "бенефициар",
+    "гарантодател",
+    "сумма гарантии",
+    "срок действия гарантии",
+    "обеспечение заявки",
+)
+
+def _looks_like_guarantee_text(text: str) -> bool:
+    """
+    Detect bank-guarantee templates by content (not filename). Files like
+    `price_offers_guarantee_2025.docx` are caught by `_is_guarantee_doc`,
+    but lots whose only document is a guarantee template are sometimes
+    listed under a neutral filename (e.g. "Шаблон.docx") — content-based
+    detection is the safety net so we never persist this as spec text.
+    """
+    if not text:
+        return False
+    head = text[:2000].lower()
+    hits = sum(1 for m in _GUARANTEE_BODY_MARKERS if m in head)
+    if hits >= 2:
+        return True
+    # Also catch the form-template signature: dozens of "____" placeholders +
+    # the word "гарантия" / "обеспечени" anywhere in the head.
+    if head.count("____") >= 5 and re.search(r"гаранти|обеспечени", head):
+        return True
+    return False
+
+
 
 
 async def _fetch_goszakup_docs(
@@ -1285,6 +1316,17 @@ async def _refresh_spec_text(lot: TenderLot, tender: Tender, force: bool = False
                     pdf_url = url
                 text = extract_text_from_bytes(content, name)
                 if text and len(text.strip()) > 50:
+                    # Drop bank-guarantee templates that slipped past the filename
+                    # filter — recognise them by content (banking placeholders +
+                    # boilerplate phrases dominate). We don't want these to land
+                    # in technical_spec_text and poison AI prompts / search.
+                    if _looks_like_guarantee_text(text):
+                        print(
+                            f"[refresh_spec_text] ✗ guarantee template detected in {name!r}; skipping",
+                            flush=True,
+                        )
+                        pdf_url = None  # don't pin a guarantee form as the spec PDF either
+                        continue
                     print(f"[refresh_spec_text] ✓ {len(text)} chars from {name!r}", flush=True)
                     raw_parts.append(text)
                 else:
