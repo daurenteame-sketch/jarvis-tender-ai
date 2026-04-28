@@ -175,11 +175,14 @@ function _filterSpecText(text: string): string {
 }
 
 function parseSpecRows(text: string): { key: string; value: string }[] | null {
+  // Lines like "Описание и требуемые функциональные, технические, …характеристики
+  // закупаемых товаров: Лампа светодиодная LED-12 …" carry the actual product
+  // description and have a colon ~120 chars in. Allow long keys (up to 200 chars).
   const lines = text.split('\n').map(l => l.trim()).filter(Boolean);
   const rows: { key: string; value: string }[] = [];
   for (const line of lines) {
     const colonIdx = line.indexOf(':');
-    if (colonIdx > 0 && colonIdx < 80) {
+    if (colonIdx > 0 && colonIdx < 200) {
       const key = line.slice(0, colonIdx).trim();
       const value = line.slice(colonIdx + 1).replace(/^:\s*/, '').trim();
       if (!key || !value) continue;
@@ -188,24 +191,24 @@ function parseSpecRows(text: string): { key: string; value: string }[] | null {
       rows.push({ key, value });
     }
   }
-  // At least 4 key-value rows to be considered a table
-  return rows.length >= 4 ? rows : null;
+  // Even 2 rows are enough to render a table — better than a wall of text.
+  return rows.length >= 2 ? rows : null;
 }
 
 function SpecTextBlock({ text }: { text: string }) {
-  const [expanded, setExpanded] = useState(false);
   const cleanText = _filterSpecText(text);
   const rows = parseSpecRows(cleanText);
 
-  if (rows) {
-    // Separate highlighted rows (important fields) from the rest
-    const important = rows.filter(r =>
-      SPEC_KEY_FIELDS.some(k => r.key.toLowerCase().includes(k))
-    );
-    const rest = rows.filter(r =>
-      !SPEC_KEY_FIELDS.some(k => r.key.toLowerCase().includes(k))
-    );
-    const visibleRows = expanded ? rows : (important.length > 0 ? important : rows.slice(0, 8));
+  if (rows && rows.length >= 2) {
+    // Sort: important fields first (in declared order), then everything else.
+    const fieldOrderIndex = (key: string) => {
+      const lk = key.toLowerCase();
+      for (let i = 0; i < SPEC_KEY_FIELDS.length; i++) {
+        if (lk.includes(SPEC_KEY_FIELDS[i])) return i;
+      }
+      return 9999;
+    };
+    const sortedRows = [...rows].sort((a, b) => fieldOrderIndex(a.key) - fieldOrderIndex(b.key));
 
     return (
       <div className="rounded-lg border border-gray-700 bg-gray-900/60 overflow-hidden">
@@ -217,40 +220,28 @@ function SpecTextBlock({ text }: { text: string }) {
           <span className="text-[10px] text-gray-500">{rows.length} полей</span>
         </div>
         <div className="divide-y divide-gray-800">
-          {visibleRows.map((r, i) => {
+          {sortedRows.map((r, i) => {
             const isKey = SPEC_KEY_FIELDS.some(k => r.key.toLowerCase().includes(k));
             return (
               <div key={i} className={`flex gap-0 text-xs ${isKey ? 'bg-gray-800/60' : ''}`}>
-                <div className="w-2/5 px-3 py-1.5 text-gray-400 font-medium shrink-0 border-r border-gray-800">
+                <div className="w-2/5 px-3 py-2 text-gray-400 font-medium shrink-0 border-r border-gray-800 break-words">
                   {r.key}
                 </div>
-                <div className="flex-1 px-3 py-1.5 text-gray-200 break-words">
+                <div className="flex-1 px-3 py-2 text-gray-100 break-words leading-relaxed">
                   {r.value}
                 </div>
               </div>
             );
           })}
         </div>
-        {rest.length > 0 || (!expanded && rows.length > visibleRows.length) ? (
-          <button
-            type="button"
-            onClick={() => setExpanded(v => !v)}
-            className="w-full px-3 py-2 flex items-center justify-center gap-1 text-xs text-blue-400 hover:text-blue-300 bg-gray-900/40 border-t border-gray-800 transition-colors"
-          >
-            {expanded
-              ? <><ChevronUp className="w-3.5 h-3.5" /> Свернуть</>
-              : <><ChevronDown className="w-3.5 h-3.5" /> Показать все поля ({rows.length})</>
-            }
-          </button>
-        ) : null}
       </div>
     );
   }
 
-  // Fallback: plain text with expand/collapse
+  // Fallback: plain readable text — full content, scrollable, no collapse.
+  // (User wants to read the spec right here, not click "Показать полностью".)
   const ruText = cleanText;
-  const preview = ruText.slice(0, 500);
-  const hasMore = ruText.length > 500;
+  if (!ruText) return null;
   return (
     <div className="rounded-lg border border-gray-700 bg-gray-900/60 overflow-hidden">
       <div className="px-3 py-2 bg-gray-800 border-b border-gray-700 flex items-center justify-between">
@@ -258,22 +249,12 @@ function SpecTextBlock({ text }: { text: string }) {
           <FileText className="w-3.5 h-3.5" />
           Техническое задание
         </span>
-        <span className="text-[10px] text-gray-500">{text.length.toLocaleString('ru')} симв.</span>
+        <span className="text-[10px] text-gray-500">{ruText.length.toLocaleString('ru')} симв.</span>
       </div>
-      <div className="p-3">
-        <pre className="text-xs text-gray-300 whitespace-pre-wrap font-mono leading-relaxed break-words">
-          {expanded ? ruText : preview}
-          {!expanded && hasMore && <span className="text-gray-600">…</span>}
+      <div className="p-3 max-h-96 overflow-y-auto">
+        <pre className="text-xs text-gray-100 whitespace-pre-wrap font-sans leading-relaxed break-words">
+          {ruText}
         </pre>
-        {hasMore && (
-          <button type="button" onClick={() => setExpanded(v => !v)}
-            className="mt-2 flex items-center gap-1 text-xs text-blue-400 hover:text-blue-300 transition-colors">
-            {expanded
-              ? <><ChevronUp className="w-3.5 h-3.5" /> Свернуть</>
-              : <><ChevronDown className="w-3.5 h-3.5" /> Показать полностью ({Math.ceil(ruText.length / 1000)}K симв.)</>
-            }
-          </button>
-        )}
       </div>
     </div>
   );
