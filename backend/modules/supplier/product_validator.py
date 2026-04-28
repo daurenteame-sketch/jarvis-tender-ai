@@ -186,15 +186,26 @@ async def validate_products(
     try:
         from openai import AsyncOpenAI
         from core.config import settings
+        from integrations.openai_client.client import _is_quota_exhausted, _mark_quota_exhausted
+
+        if _is_quota_exhausted():
+            raise RuntimeError("openai quota exhausted — using heuristic fallback")
 
         client = AsyncOpenAI(api_key=settings.OPENAI_API_KEY)
-        resp = await client.chat.completions.create(
-            model="gpt-4o-mini",
-            messages=[{"role": "user", "content": prompt}],
-            temperature=0,
-            max_tokens=400,
-            timeout=15.0,
-        )
+        try:
+            resp = await client.chat.completions.create(
+                model="gpt-4o-mini",
+                messages=[{"role": "user", "content": prompt}],
+                temperature=0,
+                max_tokens=400,
+                timeout=15.0,
+            )
+        except Exception as api_exc:
+            err_str = str(api_exc).lower()
+            if "insufficient_quota" in err_str or "429" in err_str:
+                _mark_quota_exhausted()
+            raise
+
         raw = resp.choices[0].message.content or ""
 
         # Strip markdown fences if present
