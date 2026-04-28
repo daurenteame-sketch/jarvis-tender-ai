@@ -8,10 +8,34 @@ Extraction order for PDFs:
                     and system package: tesseract-ocr tesseract-ocr-rus)
 """
 import io
+import re
 from typing import Optional
 import structlog
 
 logger = structlog.get_logger(__name__)
+
+_KAZAKH_LETTERS_RE = re.compile(r"[әғқңөұүһіӘҒҚҢӨҰҮҺІ]")
+
+
+def strip_kazakh_lines(text: str) -> str:
+    """
+    Drop any line whose Kazakh-letter density exceeds 1.5%.
+
+    goszakup tenders frequently mix Russian and Kazakh — fields like
+    "Срок поставки: Шартқа қол қойылғаннан кейін ..." have a Russian label
+    but a wholly-Kazakh value. The frontend filter (which checks single
+    chars) keeps such lines because the label is Russian. Drop them at
+    backend write time so every consumer (UI, GPT, exports) sees clean text.
+    """
+    if not text:
+        return text
+    cleaned: list[str] = []
+    for line in text.split("\n"):
+        kz_count = len(_KAZAKH_LETTERS_RE.findall(line))
+        if kz_count and kz_count / max(len(line), 1) > 0.015:
+            continue
+        cleaned.append(line)
+    return "\n".join(cleaned)
 
 # Minimum chars from pdfplumber before we try OCR
 _PDF_MIN_CHARS = 80

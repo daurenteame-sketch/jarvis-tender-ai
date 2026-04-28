@@ -32,7 +32,7 @@ from integrations.goszakup.web_scraper import GosZakupWebScraper
 from modules.scanner.deduplicator import TenderDeduplicator
 from modules.scanner.state_manager import ScanStateManager
 from modules.scanner.pipeline import pipeline, PipelineContext
-from modules.parser.document_parser import extract_text_from_bytes, truncate_for_ai
+from modules.parser.document_parser import extract_text_from_bytes, truncate_for_ai, strip_kazakh_lines
 
 logger = structlog.get_logger(__name__)
 
@@ -307,6 +307,7 @@ class GosZakupScanner:
                     print(f"[PDF EMPTY]: exception during extraction of {name!r}: {exc}", flush=True)
 
         raw_full = "\n\n".join(raw_parts)
+        raw_full = strip_kazakh_lines(raw_full)
 
         tech_text = truncate_for_ai(raw_full, MAX_SPEC_CHARS)
 

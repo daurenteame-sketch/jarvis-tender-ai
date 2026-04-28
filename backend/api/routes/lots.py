@@ -1071,6 +1071,8 @@ def _is_guarantee_doc(doc: dict) -> bool:
     return bool(re.search(r"обеспечени|гарант|банков|template|guarantee", val))
 
 
+
+
 async def _fetch_goszakup_docs(
     external_id: str,
     client: httpx.AsyncClient,
@@ -1204,7 +1206,7 @@ async def _refresh_spec_text(lot: TenderLot, tender: Tender, force: bool = False
     Returns (technical_spec_text, raw_spec_text).
     Pass force=True to always re-download even if spec text already exists.
     """
-    from modules.parser.document_parser import extract_text_from_bytes, truncate_for_ai
+    from modules.parser.document_parser import extract_text_from_bytes, truncate_for_ai, strip_kazakh_lines
 
     MAX_SPEC_CHARS = 10_000
     MAX_RAW_CHARS  = 50_000
@@ -1283,6 +1285,7 @@ async def _refresh_spec_text(lot: TenderLot, tender: Tender, force: bool = False
                 print(f"[refresh_spec_text] error {name!r}: {exc}", flush=True)
 
     raw_full  = "\n\n".join(raw_parts)
+    raw_full  = strip_kazakh_lines(raw_full)
     tech_text = truncate_for_ai(raw_full, MAX_SPEC_CHARS)
     return tech_text, raw_full[:MAX_RAW_CHARS], pdf_url
 
