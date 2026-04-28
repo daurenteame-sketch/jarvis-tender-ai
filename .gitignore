@@ -57,3 +57,5 @@ jarvis-tender-ai/
 
 # Claude Code settings
 .claude/
+.smoke_lot.json
+backups/
