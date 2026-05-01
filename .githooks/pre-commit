@@ -1,0 +1,20 @@
+#!/bin/bash
+# Pre-commit: run backend regression tests before every commit.
+# Catches "техспека опять упала", "guarantee opomas вернулась", etc.
+# Skip with `git commit --no-verify` if you really need to.
+
+set -e
+ROOT="$(git rev-parse --show-toplevel)"
+cd "$ROOT/backend"
+
+# Pick up python regardless of which shell parent is using
+PYTHON="${PYTHON:-python}"
+if ! "$PYTHON" -c "import pytest" 2>/dev/null; then
+  echo "pre-commit: pytest is not installed in the current Python."
+  echo "Install once with:  pip install pytest"
+  echo "Then re-run: git commit"
+  exit 1
+fi
+
+echo "pre-commit: running backend/tests/..."
+"$PYTHON" -m pytest tests/ -q --tb=short

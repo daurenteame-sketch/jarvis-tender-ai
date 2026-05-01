@@ -13,7 +13,7 @@ cd "$SCRIPT_DIR/.."
 source "$SCRIPT_DIR/_lib.sh"
 locate_docker
 
-echo "==> 1/5 Pulling latest code from GitHub..."
+echo "==> 1/6 Pulling latest code from GitHub..."
 git fetch origin
 LOCAL=$(git rev-parse main)
 REMOTE=$(git rev-parse origin/main)
@@ -24,10 +24,21 @@ else
   echo "  already up to date"
 fi
 
-echo "==> 2/5 Building backend + frontend (only rebuilds layers that changed)..."
+echo "==> 2/6 Running backend regression tests (no docker needed yet)..."
+if python -c "import pytest" 2>/dev/null; then
+  ( cd backend && python -m pytest tests/ -q --tb=short ) || {
+    echo "  ❌ regression tests failed — fix before proceeding"
+    exit 1
+  }
+else
+  echo "  ⚠ pytest not installed (pip install pytest) — skipping local tests"
+  echo "    GitHub Actions CI will catch regressions on push regardless"
+fi
+
+echo "==> 3/6 Building backend + frontend (only rebuilds layers that changed)..."
 dc up -d --build backend frontend
 
-echo "==> 3/5 Waiting for backend to become healthy..."
+echo "==> 4/6 Waiting for backend to become healthy..."
 for i in 1 2 3 4 5 6 7 8 9 10; do
   status=$(curl -s -o /dev/null -w "%{http_code}" http://localhost:8000/health 2>/dev/null || echo "000")
   if [ "$status" = "200" ]; then
@@ -38,7 +49,7 @@ for i in 1 2 3 4 5 6 7 8 9 10; do
   sleep 3
 done
 
-echo "==> 4/5 Waiting for frontend..."
+echo "==> 5/6 Waiting for frontend..."
 for i in 1 2 3 4 5; do
   status=$(curl -s -o /dev/null -w "%{http_code}" http://localhost:3000 2>/dev/null || echo "000")
   if [ "$status" = "200" ]; then
@@ -49,7 +60,7 @@ for i in 1 2 3 4 5; do
   sleep 3
 done
 
-echo "==> 5/5 Running smoke test..."
+echo "==> 6/6 Running smoke test..."
 bash "$SCRIPT_DIR/smoke-test.sh"
 
 echo

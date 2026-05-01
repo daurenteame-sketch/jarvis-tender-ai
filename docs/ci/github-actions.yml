@@ -1,0 +1,44 @@
+name: CI
+
+# Runs on every push to main and on pull requests. The job is the
+# automated counterpart of "open dashboard, click a lot, see if spec
+# loads" — it catches the regressions we've fixed multiple times this
+# session before they ever reach the user's machine.
+#
+# What's asserted:
+#   - bank-guarantee detector still recognises the d44c61ad/e182feea/
+#     8e37730c templates AND still leaves real specs alone
+#   - product_resolver still pulls G13 / IP65 / A4 / 5 т out of specs
+#     and injects them into search_query
+#   - quantity coercion still survives "30 пачек" without a 500
+#
+# Add new tests in backend/tests/ to lock in further invariants.
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+jobs:
+  backend-tests:
+    name: backend regression tests
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: backend
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python 3.12
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+          cache-dependency-path: backend/requirements.txt
+
+      - name: Install pytest (no full backend deps — tests are pure-Python)
+        run: pip install pytest
+
+      - name: Run regression suite
+        run: python -m pytest tests/ -v
