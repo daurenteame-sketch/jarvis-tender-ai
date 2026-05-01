@@ -1071,35 +1071,10 @@ def _is_guarantee_doc(doc: dict) -> bool:
     return bool(re.search(r"обеспечени|гарант|банков|template|guarantee", val))
 
 
-_GUARANTEE_BODY_MARKERS = (
-    "[документ: обеспечение",
-    "банковская гарантия",
-    "бенефициар",
-    "гарантодател",
-    "сумма гарантии",
-    "срок действия гарантии",
-    "обеспечение заявки",
-)
-
-def _looks_like_guarantee_text(text: str) -> bool:
-    """
-    Detect bank-guarantee templates by content (not filename). Files like
-    `price_offers_guarantee_2025.docx` are caught by `_is_guarantee_doc`,
-    but lots whose only document is a guarantee template are sometimes
-    listed under a neutral filename (e.g. "Шаблон.docx") — content-based
-    detection is the safety net so we never persist this as spec text.
-    """
-    if not text:
-        return False
-    head = text[:2000].lower()
-    hits = sum(1 for m in _GUARANTEE_BODY_MARKERS if m in head)
-    if hits >= 2:
-        return True
-    # Also catch the form-template signature: dozens of "____" placeholders +
-    # the word "гарантия" / "обеспечени" anywhere in the head.
-    if head.count("____") >= 5 and re.search(r"гаранти|обеспечени", head):
-        return True
-    return False
+# Bank-guarantee body detector lives in modules.parser.guarantee_filter so
+# the scanner write-path and this auto-extract read-path share one source
+# of truth.
+from modules.parser.guarantee_filter import looks_like_guarantee_text as _looks_like_guarantee_text  # noqa: E402
 
 
 

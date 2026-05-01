@@ -33,6 +33,7 @@ from modules.scanner.deduplicator import TenderDeduplicator
 from modules.scanner.state_manager import ScanStateManager
 from modules.scanner.pipeline import pipeline, PipelineContext
 from modules.parser.document_parser import extract_text_from_bytes, truncate_for_ai, strip_kazakh_lines
+from modules.parser.guarantee_filter import looks_like_guarantee_text as _looks_like_guarantee_text
 
 logger = structlog.get_logger(__name__)
 
@@ -308,6 +309,19 @@ class GosZakupScanner:
 
         raw_full = "\n\n".join(raw_parts)
         raw_full = strip_kazakh_lines(raw_full)
+
+        # Reject bank-guarantee templates by content (filename filter alone
+        # is not enough — some lots' only attached file is a guarantee form
+        # under a neutral name like "Шаблон.docx" or "Документ.pdf"). Same
+        # check as in api/routes/lots._looks_like_guarantee_text — duplicated
+        # here so the scan write path never persists this text.
+        if _looks_like_guarantee_text(raw_full):
+            print(
+                f"[enrich_with_spec] ✗ guarantee template detected in lot={lot_id_log!r} "
+                f"({len(raw_full)} chars) — dropping spec text + pdf url",
+                flush=True,
+            )
+            raw_full = ""
 
         tech_text = truncate_for_ai(raw_full, MAX_SPEC_CHARS)
 

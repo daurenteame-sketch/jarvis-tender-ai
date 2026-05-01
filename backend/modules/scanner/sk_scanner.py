@@ -39,6 +39,7 @@ from modules.scanner.deduplicator import TenderDeduplicator
 from modules.scanner.state_manager import ScanStateManager
 from modules.scanner.pipeline import pipeline, PipelineContext
 from modules.parser.document_parser import extract_text_from_bytes, truncate_for_ai
+from modules.parser.guarantee_filter import looks_like_guarantee_text as _looks_like_guarantee_text
 
 logger = structlog.get_logger(__name__)
 
@@ -226,9 +227,17 @@ class ZakupSKScanner:
             except Exception as exc:
                 logger.warning("ZakupSK spec extraction failed", url=doc["url"], error=str(exc))
 
-        lot_data["technical_spec_text"] = truncate_for_ai(
-            "\n\n".join(spec_texts), MAX_SPEC_CHARS
-        )
+        joined = "\n\n".join(spec_texts)
+        # Reject bank-guarantee templates by content. Same guard as in
+        # goszakup_scanner — see modules/parser/guarantee_filter.py for why.
+        if _looks_like_guarantee_text(joined):
+            logger.info(
+                "ZakupSK: dropping guarantee-template spec text",
+                lot=lot_data.get("external_id"),
+                chars=len(joined),
+            )
+            joined = ""
+        lot_data["technical_spec_text"] = truncate_for_ai(joined, MAX_SPEC_CHARS)
         return lot_data
 
     # ── DB helpers ────────────────────────────────────────────────────────────
