@@ -1,5 +1,5 @@
 'use client';
-import { useState } from 'react';
+import { useState, useEffect } from 'react';
 import { useQuery } from '@tanstack/react-query';
 import { useParams } from 'next/navigation';
 import {
@@ -916,7 +916,29 @@ export default function TenderDetailPage() {
     queryKey: ['lot', id],
     queryFn:  () => fetchLotDetail(id as string),
     enabled: !!id,
+    // Lot detail can mutate on the server during the visit:
+    // - auto-extract fills technical_spec_text on the first open (async)
+    // - reanalyze rewrites the analysis row
+    // - guarantee detector cleans bad spec text retroactively
+    // Default react-query staleness keeps showing the first snapshot
+    // forever — we want a fresh fetch every time the user opens a lot.
+    staleTime: 0,
+    refetchOnMount: 'always',
+    refetchOnWindowFocus: true,
   });
+
+  // If on first mount we got a lot with no spec but it has a tender id,
+  // auto-extract is most likely still finishing. Re-fetch once after 4s
+  // so the user sees the populated spec without having to F5.
+  useEffect(() => {
+    if (!lot) return;
+    const noSpec = !((lot as any).technical_spec_text || (lot as any).raw_spec_text);
+    const hasTender = !!(lot as any).tender_id;
+    if (noSpec && hasTender) {
+      const t = setTimeout(() => { refetch(); }, 4000);
+      return () => clearTimeout(t);
+    }
+  }, [lot, refetch]);
 
   const handleDownloadDocument = async (docIndex: number) => {
     if (!id) return;
