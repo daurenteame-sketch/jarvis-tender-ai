@@ -13,7 +13,7 @@ import { StatCard } from '@/components/dashboard/StatCard';
 import { HotLots } from '@/components/dashboard/HotLots';
 import {
   fetchDashboardSummary, fetchTrends, fetchTopCategories,
-  triggerScan, triggerRecalculate, getRecalculateStatus,
+  triggerScan, getScanStatus, triggerRecalculate, getRecalculateStatus,
   getAnalyzeEstimate, triggerAnalyzeLots, getAnalyzeStatus, getAiCostLog,
   fetchLots,
 } from '@/lib/api';
@@ -35,6 +35,7 @@ export default function DashboardPage() {
   const { user } = useAuth();
 
   const [recalcState, setRecalcState] = useState<any>(null);
+  const [scanState, setScanState] = useState<any>(null);
   const [analyzeMode, setAnalyzeMode] = useState<'fast' | 'standard' | 'full'>('standard');
   const [analyzeEstimate, setAnalyzeEstimate] = useState<any>(null);
   const [analyzeState, setAnalyzeState] = useState<any>(null);
@@ -91,13 +92,60 @@ export default function DashboardPage() {
     }
   };
 
+  const pollScanStatus = useCallback(async () => {
+    try {
+      const s = await getScanStatus();
+      setScanState(s);
+      if (s.running) {
+        setTimeout(pollScanStatus, 1500);
+      } else if (s.finished) {
+        qc.invalidateQueries({ queryKey: ['dashboard-summary'] });
+        qc.invalidateQueries({ queryKey: ['lots-profitable-preview'] });
+        if (s.error) {
+          toast(`Сканирование завершилось с ошибкой: ${s.error}`, 'error');
+        } else {
+          const msg = `Сканирование завершено. Новых лотов: ${s.lots_new ?? 0}`;
+          toast(msg, 'success');
+        }
+      }
+    } catch {}
+  }, [qc, toast]);
+
+  // On first mount: if a scan is already running (e.g. user reloaded the
+  // page mid-scan), pick it up so the progress bar continues from where it was.
+  useEffect(() => {
+    getScanStatus().then(s => {
+      if (s.running || s.finished) {
+        setScanState(s);
+        if (s.running) setTimeout(pollScanStatus, 1500);
+      }
+    }).catch(() => {});
+  }, [pollScanStatus]);
+
   const handleTriggerScan = async () => {
     try {
-      await triggerScan();
-      toast('Сканирование запущено! Новые тендеры появятся через минуту.', 'success');
+      const r = await triggerScan();
+      if (r.status === 'already_running') {
+        toast('Сканирование уже выполняется', 'info');
+        setTimeout(pollScanStatus, 500);
+        return;
+      }
+      // Optimistic: start polling immediately so the bar appears without delay
+      setScanState({
+        running: true,
+        finished: false,
+        total: r.total ?? 0,
+        done: 0,
+        pct: 5,
+        tenders_new: 0,
+        lots_new: 0,
+        error: null,
+      });
+      setTimeout(pollScanStatus, 800);
     } catch (e: any) {
       const msg = e?.response?.data?.detail || 'Ошибка запуска сканирования';
       toast(msg, 'error');
+      setScanState(null);
     }
   };
 
@@ -189,6 +237,65 @@ export default function DashboardPage() {
       </div>
 
       {/* ── Progress bars ─────────────────────────────────────────────────── */}
+      {scanState && (scanState.running || scanState.finished) && (
+        <div
+          className={`card mb-4 border ${
+            scanState.error
+              ? 'border-red-700/40 bg-red-500/5'
+              : scanState.finished
+              ? 'border-green-700/40 bg-green-500/5'
+              : 'border-blue-700/40 bg-blue-500/5'
+          }`}
+        >
+          <div className="flex items-center justify-between mb-2">
+            <span className="text-sm font-medium text-gray-200">
+              {scanState.error
+                ? '❌ Ошибка сканирования'
+                : scanState.finished
+                ? '✅ Сканирование завершено'
+                : '🔄 Сканирование запущено... (макс. ' + (scanState.total || 20) + ' тендеров)'}
+            </span>
+            <span className="text-xs text-gray-400">
+              {scanState.finished
+                ? `${scanState.done} / ${scanState.total}`
+                : `${scanState.pct}%`}
+            </span>
+          </div>
+          <div className="w-full bg-gray-800 rounded-full h-1.5">
+            <div
+              className={`h-1.5 rounded-full transition-all ${
+                scanState.error
+                  ? 'bg-red-500'
+                  : scanState.finished
+                  ? 'bg-green-500'
+                  : 'bg-blue-500'
+              }`}
+              style={{ width: `${scanState.pct}%` }}
+            />
+          </div>
+          {scanState.finished && !scanState.error && (
+            <div className="flex gap-6 mt-2 text-xs">
+              <span className="text-green-400">
+                Новых лотов: <strong>{scanState.lots_new}</strong>
+              </span>
+              <span className="text-gray-400">
+                Новых тендеров: <strong>{scanState.tenders_new}</strong>
+              </span>
+              <button
+                type="button"
+                onClick={() => setScanState(null)}
+                className="ml-auto text-gray-500 hover:text-gray-300 text-xs"
+              >
+                Скрыть
+              </button>
+            </div>
+          )}
+          {scanState.error && (
+            <p className="text-xs text-red-300 mt-2">{scanState.error}</p>
+          )}
+        </div>
+      )}
+
       {recalcState && (recalcState.running || recalcState.finished) && (
         <div className={`card mb-4 border ${recalcState.finished ? 'border-green-700/40 bg-green-500/5' : 'border-blue-700/40 bg-blue-500/5'}`}>
           <div className="flex items-center justify-between mb-2">

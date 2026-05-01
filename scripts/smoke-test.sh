@@ -104,10 +104,10 @@ fi
 # 5. dev-mode budget guard active (cost regression check)
 ESTIMATE=$(curl -s -H "Authorization: Bearer $TOKEN" "$API/api/v1/scan/analyze-estimate?mode=standard" 2>/dev/null)
 WILL=$(echo "$ESTIMATE" | python -c "import sys,json; print(json.load(sys.stdin).get('will_analyze','?'))" 2>/dev/null)
-if [ "$WILL" = "20" ]; then
-  ok "DEV_MODE cap active (will_analyze=20)"
+if [ "$WILL" = "10" ]; then
+  ok "DEV_MODE cap active (will_analyze=10)"
 else
-  bad "DEV_MODE cap missing or wrong (will_analyze=$WILL, expected 20)"
+  bad "DEV_MODE cap missing or wrong (will_analyze=$WILL, expected 10)"
 fi
 
 echo

@@ -3,7 +3,9 @@ Scan control routes — manual trigger, status, and AI analysis control.
 All endpoints require authentication. Trigger/recalculate require admin role.
 """
 import asyncio
+from datetime import datetime, timezone
 from fastapi import APIRouter, BackgroundTasks, Depends, Query
+from core.config import settings
 from modules.scanner.scanner import TenderScanner
 from modules.profitability.recalculate import run_recalculation, get_progress
 from modules.ai_analyzer.batch_analyzer import (
@@ -15,7 +17,20 @@ from models.user import User
 
 router = APIRouter(prefix="/scan", tags=["scan"])
 _scanner = TenderScanner()
-_scan_running = False
+
+# In-memory scan progress. Single-run state (we never run two scans in parallel)
+# so a global dict is enough — no need for Redis here.
+_scan_state: dict = {
+    "running":      False,
+    "finished":     False,
+    "total":        0,        # planned upper bound (SCAN_LIMIT × 2 platforms)
+    "done":         0,        # tenders observed so far across platforms
+    "lots_new":     0,        # populated when scan completes
+    "tenders_new":  0,
+    "started_at":   None,
+    "finished_at":  None,
+    "error":        None,
+}
 
 
 @router.post("/trigger")
@@ -24,25 +39,93 @@ async def trigger_scan(
     current_user: User = Depends(require_admin),
 ):
     """Manually trigger a tender scan."""
-    global _scan_running
-    if _scan_running:
+    if _scan_state["running"]:
         return {"status": "already_running", "message": "Сканирование уже выполняется"}
 
+    # Plan an upper bound: each platform processes up to SCAN_LIMIT tenders.
+    planned_total = max(1, settings.SCAN_LIMIT) * 2  # goszakup + zakupsk
+
+    _scan_state.update({
+        "running":      True,
+        "finished":     False,
+        "total":        planned_total,
+        "done":         0,
+        "lots_new":     0,
+        "tenders_new":  0,
+        "started_at":   datetime.now(timezone.utc).isoformat(),
+        "finished_at":  None,
+        "error":        None,
+    })
+
     async def run():
-        global _scan_running
-        _scan_running = True
         try:
-            await _scanner.run_full_scan()
-        finally:
-            _scan_running = False
+            results = await _scanner.run_full_scan()
+            # results: {"goszakup": {...}, "zakupsk": {...}}
+            tenders_new = sum(r.get("tenders_new", 0) for r in results.values())
+            lots_new    = sum(r.get("lots_new", 0)    for r in results.values())
+            tenders_seen = sum(r.get("tenders_found", 0) for r in results.values())
+            _scan_state.update({
+                "running":     False,
+                "finished":    True,
+                "done":        min(tenders_seen, _scan_state["total"]),
+                "tenders_new": tenders_new,
+                "lots_new":    lots_new,
+                "finished_at": datetime.now(timezone.utc).isoformat(),
+            })
+        except Exception as exc:
+            _scan_state.update({
+                "running":     False,
+                "finished":    True,
+                "error":       str(exc)[:200],
+                "finished_at": datetime.now(timezone.utc).isoformat(),
+            })
 
     background_tasks.add_task(run)
-    return {"status": "started", "message": "Сканирование запущено"}
+    return {
+        "status":  "started",
+        "message": "Сканирование запущено",
+        "total":   planned_total,
+    }
 
 
 @router.get("/status")
 async def get_scan_status(current_user: User = Depends(get_current_user)):
-    return {"is_running": _scan_running}
+    """
+    Current scan state — used by the dashboard progress bar.
+
+    Fields:
+      running     true while scan is in progress
+      finished    true after the most recent run completed (sticks until next trigger)
+      total       planned upper bound: SCAN_LIMIT × number of platforms
+      done        tenders processed (only updated on completion at the moment)
+      pct         derived percentage (0-100)
+      tenders_new / lots_new   results once finished
+      started_at / finished_at ISO timestamps
+      error       error message if the run blew up
+    """
+    pct = 0
+    if _scan_state["total"] > 0:
+        pct = min(100, int(_scan_state["done"] * 100 / _scan_state["total"]))
+    # If running but done==0, show indeterminate-ish 5% so the bar is visible
+    if _scan_state["running"] and pct == 0:
+        pct = 5
+    if _scan_state["finished"]:
+        pct = 100
+    return {
+        # Old shape kept for backwards-compat
+        "is_running": _scan_state["running"],
+        # New extended shape
+        "running":     _scan_state["running"],
+        "finished":    _scan_state["finished"],
+        "total":       _scan_state["total"],
+        "done":        _scan_state["done"],
+        "pct":         pct,
+        "tenders_new": _scan_state["tenders_new"],
+        "lots_new":    _scan_state["lots_new"],
+        "started_at":  _scan_state["started_at"],
+        "finished_at": _scan_state["finished_at"],
+        "error":       _scan_state["error"],
+    }
 
 
 @router.post("/recalculate-profitability")
