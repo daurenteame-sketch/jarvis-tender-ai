@@ -50,6 +50,61 @@ _CYR = re.compile(r'\b([А-ЯЁ]{2,5}\s*\d+[А-ЯЁ]?\d*\s*[-–/]\s*[А-ЯЁ0-9
 # Latin model  e.g. "ACS580-01-012A-4", "CM3-5 A-R-A-E"
 _LAT = re.compile(r'\b([A-Z]{1,6}\d+[A-Z0-9]*[-–/][A-Z0-9][-A-Z0-9/\-]{2,25})\b')
 
+# Short marking  e.g. "LED-12", "T8-18W", "MR16-7", "ТРВ-5", "GU10-9W"
+# — letters + dash + digits + optional unit suffix, ≥3 letters or has digits
+# Matches a lot of real-world part numbers that _LAT is too strict for.
+_SHORT_MARK = re.compile(
+    r'\b([A-Z]{2,5}[-–]\d{1,4}(?:[A-Z]{1,4})?)\b'
+)
+
+# ── Discriminator attributes — what differs Lamp G13 18W from Lamp E27 9W ──
+# These are the parameters that turn "8 random lamps from Kaspi" into
+# "the right lamp". Each finds a single normalised token to inject into
+# the supplier search query. Order matters — most discriminating first.
+
+# Lamp socket / base type — for product category "лампа"
+# G13, E27, E14, E40, GU10, GU5.3, MR16, GX53, T8, T5, R7s, B22
+_SOCKET = re.compile(
+    r'\b(?:цоколь[ая]?\s+|тип\s+цоколя\s+)?'
+    r'(G\s?\d{1,2}(?:\.\d)?|E\s?\d{1,2}|GU\s?\d{1,2}(?:\.\d)?|GX\s?\d{1,2}|'
+    r'MR\s?\d{1,2}|R7s|B\s?\d{1,2}|T\s?\d{1,2})\b',
+    re.IGNORECASE,
+)
+
+# Power: 18 Вт, 100W, 0.5 кВт, 250mW
+_POWER = re.compile(
+    r'\b(\d+(?:[.,]\d+)?)\s*(к?[Вв]т|к?W|mW|МВт)\b'
+)
+
+# Voltage: 220 В, 12V, 24В DC
+_VOLTAGE = re.compile(
+    r'\b(\d+(?:[.,]\d+)?)\s*(В|V)\b(?:\s*(AC|DC|постоянн|переменн)\w*)?'
+)
+
+# Ingress protection: IP65, IP67, IP44, IP20
+_IP = re.compile(r'\b(IP[\s-]?\d{2})\b', re.IGNORECASE)
+
+# Paper / sheet format: A4, A3, B5 — accepts both Latin A/B and Cyrillic
+# А/В (U+0410 / U+0412) since Russian goszakup specs mix both, and the
+# Cyrillic glyphs look identical to the user. Result is normalised to
+# Latin in _extract_key_attributes for consistent search queries.
+_PAPER = re.compile(r'(?:^|[^\wА-Яа-я])([ABАВ]\d)(?=[\s.,;:)\]]|$)', re.IGNORECASE)
+
+# Density: 80 г/м2, 150 г/м²
+_DENSITY = re.compile(r'\b(\d+)\s*г/м[²2]\b')
+
+# Length / size hints in mm/cm/m: "1200 мм", "L=600", "длина 4 м"
+_LENGTH = re.compile(
+    r'\b(?:L\s*=\s*|длина[ой]?\s+|размер\s+)?(\d+(?:[.,]\d+)?)\s*(мм|см|м)\b',
+    re.IGNORECASE,
+)
+
+# Capacity / load: 5 т, 50 кг, 100 л
+_CAPACITY = re.compile(
+    r'\b(\d+(?:[.,]\d+)?)\s*(т|кг|л|m³|м³)\b(?!\w)',
+    re.IGNORECASE,
+)
+
 # Generic prefixes to strip from lot titles
 _TITLE_PREFIXES = re.compile(
     r'^(поставка|приобретение|закупка|оказание|выполнение|предоставление)'
@@ -242,6 +297,23 @@ def resolve_product(
         elif spec:
             params = _extract_inline_params(spec)
 
+    # ── Stage 3b: pull discriminator attributes from spec + AI params ──────────
+    # These (socket type, power, IP, paper format, length, capacity, …) are
+    # the things that turn a generic "Лампа светодиодная" search into a
+    # precise "Лампа светодиодная G13 18 Вт 1200 мм" search. Source order:
+    # spec text first (richest), then AI technical_params values, then title
+    # — so explicit numbers in the goszakup PDF win over AI guesses.
+    attr_source = "\n".join(filter(None, [
+        spec,
+        " ".join(str(v) for v in (ai_technical_params or {}).values()),
+        title,
+    ]))
+    key_attrs = _extract_key_attributes(attr_source)
+
+    # Stash them under namespaced keys so they don't clobber regular params
+    for k, v in key_attrs.items():
+        params.setdefault(f"_attr_{k}", v)
+
     # ── Stage 4: build search_query ─────────────────────────────────────────────
     if spec_table and source in ("ai_name", "title"):
         # Structured spec available — build enriched query from table
@@ -254,6 +326,11 @@ def resolve_product(
             parts.append(standard)
         search_query = _shorten(" ".join(dict.fromkeys(parts)), 120)
 
+    # Inject discriminator attributes into the supplier search query.
+    # This is the whole point of Stage 3b — making "G13 18 Вт" land in
+    # the Kaspi URL, not just sit in a parameters dict nobody reads.
+    search_query = _merge_attrs_into_query(search_query, key_attrs)
+
     brand_out = ai_brand.strip() or None
 
     return {
@@ -262,6 +339,7 @@ def resolve_product(
         "brand":         brand_out,
         "standard":      standard,
         "parameters":    params,
+        "key_attributes": key_attrs,
         "search_query":  search_query,
         "source":        source,
     }
@@ -384,3 +462,104 @@ def _extract_inline_params(spec: str) -> dict:
         if key and val and len(params) < 10:
             params[key] = val
     return params
+
+
+def _extract_key_attributes(text: str) -> dict[str, str]:
+    """
+    Pull the handful of attributes that actually distinguish similar products
+    on a marketplace — socket type, power, voltage, IP rating, paper format,
+    density, characteristic length, load capacity. These are what we'll add
+    to the supplier search query so Kaspi/Satu return the RIGHT lamp/cable/
+    bag, not eight random ones with the same generic name.
+
+    Returns a small dict of normalised tokens. Each value is suitable to
+    drop into a search string verbatim (e.g. "G13", "18 Вт", "IP65", "А4").
+    Empty dict if nothing matches.
+    """
+    if not text:
+        return {}
+    out: dict[str, str] = {}
+    sample = text[:6000]  # cap regex work on huge specs
+
+    # Socket type — the single biggest discriminator for lamps
+    m = _SOCKET.search(sample)
+    if m:
+        token = m.group(1).upper().replace(" ", "")
+        # Skip false positives like "B22" inside model numbers — require it
+        # to be near a lamp/socket cue word
+        ctx_lo = max(0, m.start() - 80)
+        ctx = sample[ctx_lo:m.end() + 40].lower()
+        if any(w in ctx for w in ("цокол", "лампа", "патрон", "socket", "base")):
+            out["socket"] = token
+
+    # Power — only first match; gpt analyzers tend to repeat it
+    m = _POWER.search(sample)
+    if m:
+        unit = m.group(2).replace("в", "В").replace("т", "т")  # normalise
+        # Keep Latin form when source was W/kW (matches marketplace listings better)
+        if "W" in m.group(2) or "w" in m.group(2):
+            unit = m.group(2).upper().replace("MW", "mW")
+        out["power"] = f"{m.group(1).replace(',', '.')} {unit}"
+
+    # Voltage — useful for transformers, drivers, motors
+    m = _VOLTAGE.search(sample)
+    if m:
+        out["voltage"] = f"{m.group(1)} {m.group(2)}"
+
+    # IP rating
+    m = _IP.search(sample)
+    if m:
+        out["ip"] = m.group(1).upper().replace(" ", "").replace("-", "")
+
+    # Paper format (А4 in Cyrillic looks identical to A4 — normalise to Latin
+    # so the same query token matches both Cyrillic and Latin marketplace SKUs)
+    m = _PAPER.search(sample)
+    if m:
+        token = m.group(1).upper()
+        token = token.replace("А", "A").replace("В", "B")  # Cyrillic → Latin
+        out["format"] = token
+
+    # Paper / sheet density — emit ASCII-safe form (no superscript ²) so it
+    # doesn't break URL encoding / log printing; "г/м2" matches marketplace
+    # listings just as well as "г/м²".
+    m = _DENSITY.search(sample)
+    if m:
+        out["density"] = f"{m.group(1)} г/м2"
+
+    # Length — often critical for cables, lamps (T8 600mm vs 1200mm), pipes
+    m = _LENGTH.search(sample)
+    if m:
+        unit = m.group(2)
+        out["length"] = f"{m.group(1).replace(',', '.')} {unit}"
+
+    # Load capacity — for tow ropes, slings, hoists
+    m = _CAPACITY.search(sample)
+    if m:
+        out["capacity"] = f"{m.group(1).replace(',', '.')} {m.group(2)}"
+
+    return out
+
+
+def _merge_attrs_into_query(query: str, attrs: dict[str, str]) -> str:
+    """
+    Append discriminator attributes to a search query, but only those not
+    already present (case-insensitive substring check). Cap the final string
+    so marketplace search engines don't choke.
+    """
+    if not attrs:
+        return query
+    q_lower = query.lower()
+    additions = []
+    # Order matters: most-discriminating first so they survive the length cap
+    for key in ("socket", "power", "format", "density", "ip", "voltage",
+                "length", "capacity"):
+        v = attrs.get(key)
+        if not v:
+            continue
+        if v.lower() in q_lower:
+            continue
+        additions.append(v)
+    if not additions:
+        return query
+    enriched = (query + " " + " ".join(additions)).strip()
+    return _shorten(enriched, 140)
